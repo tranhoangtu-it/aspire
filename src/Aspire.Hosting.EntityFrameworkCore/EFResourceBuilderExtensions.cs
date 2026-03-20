@@ -199,44 +199,19 @@ public static class EFResourceBuilderExtensions
                 Name = $"{migrationResource.Name}-generate-migration-script",
                 Description = $"Generate EF Core migration SQL script for {migrationResource.Name}",
                 Resource = migrationResource,
-                Action = async stepContext =>
-                {
-                    var loggerFactory = stepContext.Services.GetRequiredService<ILoggerFactory>();
-                    var logger = loggerFactory.CreateLogger<EFMigrationResource>();
-                    var pipelineOptions = stepContext.Services.GetRequiredService<IOptions<PipelineOptions>>();
-
-                    using var executor = new EFCoreOperationExecutor(
-                        migrationResource.ProjectResource,
-                        migrationResource.MigrationsProjectPath,
-                        migrationResource.ContextTypeName,
-                        logger,
-                        stepContext.CancellationToken,
-                        stepContext.Services,
-                        migrationResource.ToolResource);
-
-                    string? outputPath = null;
-                    if (!string.IsNullOrEmpty(pipelineOptions.Value.OutputPath))
+                RequiredBySteps = [WellKnownPipelineSteps.Publish],
+                Action = stepContext => ExecutePipelineOperationAsync(
+                    stepContext, migrationResource, "migration script",
+                    (executor, outputDir) =>
                     {
-                        var outputDir = Path.Combine(pipelineOptions.Value.OutputPath, "efmigrations");
-                        Directory.CreateDirectory(outputDir);
-                        outputPath = Path.Combine(outputDir, migrationResource.Name + ".sql");
-                    }
-
-                    logger.LogInformation("Generating migration script for '{ResourceName}'...", migrationResource.Name);
-                    var result = await executor.GenerateMigrationScriptAsync(
-                        outputPath,
-                        migrationResource.ScriptIdempotent,
-                        migrationResource.ScriptNoTransactions).ConfigureAwait(false);
-
-                    if (result.Success)
-                    {
-                        logger.LogInformation("Migration script generated successfully for '{ResourceName}'.", migrationResource.Name);
-                    }
-                    else
-                    {
-                        throw new InvalidOperationException($"Failed to generate migration script for '{migrationResource.Name}': {result.ErrorMessage}");
-                    }
-                }
+                        var outputPath = outputDir is not null
+                            ? Path.Combine(outputDir, migrationResource.Name + ".sql")
+                            : null;
+                        return executor.GenerateMigrationScriptAsync(
+                            outputPath,
+                            migrationResource.ScriptIdempotent,
+                            migrationResource.ScriptNoTransactions);
+                    })
             };
         }
 
@@ -247,47 +222,63 @@ public static class EFResourceBuilderExtensions
                 Name = $"{migrationResource.Name}-generate-migration-bundle",
                 Description = $"Generate EF Core migration bundle for {migrationResource.Name}",
                 Resource = migrationResource,
-                Action = async stepContext =>
-                {
-                    var loggerFactory = stepContext.Services.GetRequiredService<ILoggerFactory>();
-                    var logger = loggerFactory.CreateLogger<EFMigrationResource>();
-                    var pipelineOptions = stepContext.Services.GetRequiredService<IOptions<PipelineOptions>>();
-
-                    using var executor = new EFCoreOperationExecutor(
-                        migrationResource.ProjectResource,
-                        migrationResource.MigrationsProjectPath,
-                        migrationResource.ContextTypeName,
-                        logger,
-                        stepContext.CancellationToken,
-                        stepContext.Services,
-                        migrationResource.ToolResource);
-
-                    string? outputPath = null;
-                    if (!string.IsNullOrEmpty(pipelineOptions.Value.OutputPath))
+                RequiredBySteps = [WellKnownPipelineSteps.Publish],
+                Action = stepContext => ExecutePipelineOperationAsync(
+                    stepContext, migrationResource, "migration bundle",
+                    (executor, outputDir) =>
                     {
-                        var outputDir = Path.Combine(pipelineOptions.Value.OutputPath, "efmigrations");
-                        Directory.CreateDirectory(outputDir);
-                        var bundleName = migrationResource.Name;
-                        bundleName += OperatingSystem.IsWindows() ? ".exe" : "";
-                        outputPath = Path.Combine(outputDir, bundleName);
-                    }
-
-                    logger.LogInformation("Generating migration bundle for '{ResourceName}'...", migrationResource.Name);
-                    var result = await executor.GenerateMigrationBundleAsync(
-                        outputPath,
-                        migrationResource.BundleTargetRuntime,
-                        migrationResource.BundleSelfContained).ConfigureAwait(false);
-
-                    if (result.Success)
-                    {
-                        logger.LogInformation("Migration bundle generated successfully for '{ResourceName}'.", migrationResource.Name);
-                    }
-                    else
-                    {
-                        throw new InvalidOperationException($"Failed to generate migration bundle for '{migrationResource.Name}': {result.ErrorMessage}");
-                    }
-                }
+                        string? outputPath = null;
+                        if (outputDir is not null)
+                        {
+                            var bundleName = migrationResource.Name;
+                            bundleName += OperatingSystem.IsWindows() ? ".exe" : "";
+                            outputPath = Path.Combine(outputDir, bundleName);
+                        }
+                        return executor.GenerateMigrationBundleAsync(
+                            outputPath,
+                            migrationResource.BundleTargetRuntime,
+                            migrationResource.BundleSelfContained);
+                    })
             };
+        }
+    }
+
+    private static async Task ExecutePipelineOperationAsync(
+        PipelineStepContext stepContext,
+        EFMigrationResource migrationResource,
+        string operationName,
+        Func<EFCoreOperationExecutor, string?, Task<EFOperationResult>> executeOperation)
+    {
+        var loggerFactory = stepContext.Services.GetRequiredService<ILoggerFactory>();
+        var logger = loggerFactory.CreateLogger<EFMigrationResource>();
+        var pipelineOptions = stepContext.Services.GetRequiredService<IOptions<PipelineOptions>>();
+
+        using var executor = new EFCoreOperationExecutor(
+            migrationResource.ProjectResource,
+            migrationResource.MigrationsProjectPath,
+            migrationResource.ContextTypeName,
+            logger,
+            stepContext.CancellationToken,
+            stepContext.Services,
+            migrationResource.ToolResource);
+
+        string? outputDir = null;
+        if (!string.IsNullOrEmpty(pipelineOptions.Value.OutputPath))
+        {
+            outputDir = Path.Combine(pipelineOptions.Value.OutputPath, "efmigrations");
+            Directory.CreateDirectory(outputDir);
+        }
+
+        logger.LogInformation("Generating {Operation} for '{ResourceName}'...", operationName, migrationResource.Name);
+        var result = await executeOperation(executor, outputDir).ConfigureAwait(false);
+
+        if (result.Success)
+        {
+            logger.LogInformation("{Operation} generated successfully for '{ResourceName}'.", operationName, migrationResource.Name);
+        }
+        else
+        {
+            throw new InvalidOperationException($"Failed to generate {operationName} for '{migrationResource.Name}': {result.ErrorMessage}");
         }
     }
 
