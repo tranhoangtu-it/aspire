@@ -44,7 +44,7 @@ public partial class FoundryModel
         public static readonly FoundryModel ClaudeOpus45 = new() { Name = "claude-opus-4-5", Version = "20251101", Format = "Anthropic" };
 
         /// <summary>
-        /// Claude Opus 4.6 is the latest version of Anthropic's most intelligent model, and the world's best model for coding, enterprise agents, and professional work. With a 1M token context window (beta) and 128K max output, Opus 4.6 is ideal for production code,
+        /// Claude Opus 4.6 is the latest version of Anthropic's most intelligent model, and the world's best model for coding, enterprise agents, and professional work. With a 1M token context window and 128K max output, Opus 4.6 is ideal for production code, sophist
         /// </summary>
         public static readonly FoundryModel ClaudeOpus46 = new() { Name = "claude-opus-4-6", Version = "1", Format = "Anthropic" };
 
@@ -54,7 +54,7 @@ public partial class FoundryModel
         public static readonly FoundryModel ClaudeSonnet45 = new() { Name = "claude-sonnet-4-5", Version = "20250929", Format = "Anthropic" };
 
         /// <summary>
-        /// Claude Sonnet 4.6 delivers frontier intelligence at scale—built for coding, agents, and enterprise workflows. With a 1M token context window (beta) and 128K max output, Sonnet 4.6 is ideal for coding, agents, office tasks, financial analysis, cybersecurity
+        /// Claude Sonnet 4.6 delivers frontier intelligence at scale—built for coding, agents, and enterprise workflows. With a 1M token context window and 128K max output, Sonnet 4.6 is ideal for coding, agents, office tasks, financial analysis, cybersecurity, and c
         /// </summary>
         public static readonly FoundryModel ClaudeSonnet46 = new() { Name = "claude-sonnet-4-6", Version = "1", Format = "Anthropic" };
     }
@@ -1313,6 +1313,11 @@ public partial class FoundryModel
         /// MAI-DS-R1 is a DeepSeek-R1 reasoning model that has been post-trained by the Microsoft AI team to fill in information gaps in the previous version of the model and improve its harm protections while maintaining R1 reasoning capabilities.
         /// </summary>
         public static readonly FoundryModel MaiDSR1 = new() { Name = "MAI-DS-R1", Version = "1", Format = "Microsoft" };
+
+        /// <summary>
+        /// MAI-Transcribe-1 is an ASR model built to deliver high quality batch transcription whenever the user speaks. It is designed to achieve high accuracy across 25 languages and to adapt seamlessly to diverse accents, dialects, and regional speech patterns.
+        /// </summary>
+        public static readonly FoundryModel MaiTranscribe1 = new() { Name = "MAI-Transcribe-1", Version = "1", Format = "Microsoft" };
 
         /// <summary>
         /// Model router is a deployable AI model that is trained to select the most suitable large language model (LLM) for a given prompt.
@@ -2784,6 +2789,16 @@ public partial class FoundryModel
         /// GPT‑5.4 is OpenAI’s most capable frontier model, built to deliver faster, more reliable results for complex professional work.
         /// </summary>
         public static readonly FoundryModel Gpt54 = new() { Name = "gpt-5.4", Version = "2026-03-05", Format = "OpenAI" };
+
+        /// <summary>
+        /// GPT‑5.4‑mini is a compact, cost‑efficient model designed for reliable performance across high‑volume, everyday AI workloads.
+        /// </summary>
+        public static readonly FoundryModel Gpt54Mini = new() { Name = "gpt-5.4-mini", Version = "2026-03-17", Format = "OpenAI" };
+
+        /// <summary>
+        /// GPT‑5.4‑nano is a lightweight, ultra‑efficient model designed for low‑latency, cost‑effective tasks at massive scale.
+        /// </summary>
+        public static readonly FoundryModel Gpt54Nano = new() { Name = "gpt-5.4-nano", Version = "2026-03-17", Format = "OpenAI" };
 
         /// <summary>
         /// GPT‑5.4-Pro is OpenAI’s most capable frontier model, built to deliver faster, more reliable results for complex professional work.
