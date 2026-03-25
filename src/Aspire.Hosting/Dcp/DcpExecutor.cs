@@ -1229,114 +1229,9 @@ internal sealed partial class DcpExecutor : IDcpExecutor, IAsyncDisposable
                 spec.Args.AddRange(projectArgs);
             }
 
-            // Build the base paths for certificate output in the DCP session directory.
-            var certificatesRootDir = Path.Join(_locations.DcpSessionDir, exe.Name());
-            var bundleOutputPath = Path.Join(certificatesRootDir, "cert.pem");
-            var customBundleOutputPath = Path.Join(certificatesRootDir, "bundles");
-            var certificatesOutputPath = Path.Join(certificatesRootDir, "certs");
-            var baseServerAuthOutputPath = Path.Join(certificatesRootDir, "private");
+            var (configuration, pemCertificates) = await BuildExecutableConfiguration(er, resourceLogger, cancellationToken).ConfigureAwait(false);
 
-            var configuration = await ExecutionConfigurationBuilder.Create(er.ModelResource)
-                .WithArgumentsConfig()
-                .WithEnvironmentVariablesConfig()
-                .WithCertificateTrustConfig(scope =>
-                {
-                    var dirs = new List<string> { certificatesOutputPath };
-                    if (scope == CertificateTrustScope.Append)
-                    {
-                        var existing = Environment.GetEnvironmentVariable("SSL_CERT_DIR");
-                        if (!string.IsNullOrEmpty(existing))
-                        {
-                            dirs.AddRange(existing.Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries));
-                        }
-                    }
-
-                    return new()
-                    {
-                        CertificateBundlePath = ReferenceExpression.Create($"{bundleOutputPath}"),
-                        // Build the SSL_CERT_DIR value by combining the new certs directory with any existing directories.
-                        CertificateDirectoriesPath = ReferenceExpression.Create($"{string.Join(Path.PathSeparator, dirs)}"),
-                        RootCertificatesPath = certificatesRootDir,
-                    };
-                })
-                .WithHttpsCertificateConfig(cert => new()
-                {
-                    CertificatePath = ReferenceExpression.Create($"{Path.Join(baseServerAuthOutputPath, $"{cert.Thumbprint}.crt")}"),
-                    KeyPath = ReferenceExpression.Create($"{Path.Join(baseServerAuthOutputPath, $"{cert.Thumbprint}.key")}"),
-                    PfxPath = ReferenceExpression.Create($"{Path.Join(baseServerAuthOutputPath, $"{cert.Thumbprint}.pfx")}"),
-                })
-                .BuildAsync(_executionContext, resourceLogger, cancellationToken)
-                .ConfigureAwait(false);
-
-            // Add the certificates to the executable spec so they'll be placed in the DCP config
-            ExecutablePemCertificates? pemCertificates = null;
-            if (configuration.TryGetAdditionalData<CertificateTrustExecutionConfigurationData>(out var certificateTrustConfiguration)
-                && certificateTrustConfiguration.Scope != CertificateTrustScope.None
-                && certificateTrustConfiguration.Certificates.Count > 0)
-            {
-                pemCertificates = new ExecutablePemCertificates
-                {
-                    Certificates = certificateTrustConfiguration.Certificates.Select(c =>
-                    {
-                        return new PemCertificate
-                        {
-                            Thumbprint = c.Thumbprint,
-                            Contents = c.ExportCertificatePem(),
-                        };
-                    }).DistinctBy(cert => cert.Thumbprint).ToList(),
-                    ContinueOnError = true,
-                };
-
-                if (certificateTrustConfiguration.CustomBundlesFactories.Count > 0)
-                {
-                    Directory.CreateDirectory(customBundleOutputPath);
-                }
-
-                foreach (var bundleFactory in certificateTrustConfiguration.CustomBundlesFactories)
-                {
-                    var bundleId = bundleFactory.Key;
-                    var bundleBytes = await bundleFactory.Value(certificateTrustConfiguration.Certificates, cancellationToken).ConfigureAwait(false);
-
-                    File.WriteAllBytes(Path.Join(customBundleOutputPath, bundleId), bundleBytes);
-                }
-            }
-
-            exe.Spec.PemCertificates = pemCertificates;
-
-            if (configuration.TryGetAdditionalData<HttpsCertificateExecutionConfigurationData>(out var tlsCertificateConfiguration))
-            {
-                var thumbprint = tlsCertificateConfiguration.Certificate.Thumbprint;
-                var publicCetificatePem = tlsCertificateConfiguration.Certificate.ExportCertificatePem();
-                (var keyPem, var pfxBytes) = await GetCertificateKeyMaterialAsync(tlsCertificateConfiguration, cancellationToken).ConfigureAwait(false);
-
-                if (OperatingSystem.IsWindows())
-                {
-                    Directory.CreateDirectory(baseServerAuthOutputPath);
-                }
-                else
-                {
-                    Directory.CreateDirectory(baseServerAuthOutputPath, UnixFileMode.UserExecute | UnixFileMode.UserWrite | UnixFileMode.UserRead);
-                }
-
-                File.WriteAllText(Path.Join(baseServerAuthOutputPath, $"{thumbprint}.crt"), publicCetificatePem);
-
-                if (keyPem is not null)
-                {
-                    var keyBytes = Encoding.ASCII.GetBytes(keyPem);
-
-                    // Write each of the certificate, key, and PFX assets to the temp folder
-                    File.WriteAllBytes(Path.Join(baseServerAuthOutputPath, $"{thumbprint}.key"), keyBytes);
-
-                    Array.Clear(keyPem, 0, keyPem.Length);
-                    Array.Clear(keyBytes, 0, keyBytes.Length);
-                }
-
-                if (pfxBytes is not null)
-                {
-                    File.WriteAllBytes(Path.Join(baseServerAuthOutputPath, $"{thumbprint}.pfx"), pfxBytes);
-                    Array.Clear(pfxBytes, 0, pfxBytes.Length);
-                }
-            }
+            spec.PemCertificates = pemCertificates;
 
             var launchArgs = BuildLaunchArgs(er, spec, configuration.Arguments);
             var executableArgs = launchArgs.Where(a => a.Executable).Select(a => a.Value).ToList();
@@ -1384,6 +1279,114 @@ internal sealed partial class DcpExecutor : IDcpExecutor, IAsyncDisposable
         {
             AspireEventSource.Instance.DcpObjectCreationStop(er.DcpResource.Kind, er.DcpResourceName);
         }
+    }
+
+    private async Task<(IExecutionConfigurationResult Configuration, ExecutablePemCertificates? PemCertificates)>
+    BuildExecutableConfiguration(RenderedModelResource er, ILogger resourceLogger, CancellationToken cancellationToken)
+    {
+        var exe = (Executable)er.DcpResource;
+
+        // Build the base paths for certificate output in the DCP session directory.
+        var certificatesRootDir = Path.Join(_locations.DcpSessionDir, exe.Name());
+        var bundleOutputPath = Path.Join(certificatesRootDir, "cert.pem");
+        var customBundleOutputPath = Path.Join(certificatesRootDir, "bundles");
+        var certificatesOutputPath = Path.Join(certificatesRootDir, "certs");
+        var baseServerAuthOutputPath = Path.Join(certificatesRootDir, "private");
+
+        var configuration = await ExecutionConfigurationBuilder.Create(er.ModelResource)
+            .WithArgumentsConfig()
+            .WithEnvironmentVariablesConfig()
+            .WithCertificateTrustConfig(scope =>
+            {
+                var dirs = new List<string> { certificatesOutputPath };
+                if (scope == CertificateTrustScope.Append)
+                {
+                    var existing = Environment.GetEnvironmentVariable("SSL_CERT_DIR");
+                    if (!string.IsNullOrEmpty(existing))
+                    {
+                        dirs.AddRange(existing.Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries));
+                    }
+                }
+
+                return new()
+                {
+                    CertificateBundlePath = ReferenceExpression.Create($"{bundleOutputPath}"),
+                    // Build the SSL_CERT_DIR value by combining the new certs directory with any existing directories.
+                    CertificateDirectoriesPath = ReferenceExpression.Create($"{string.Join(Path.PathSeparator, dirs)}"),
+                    RootCertificatesPath = certificatesRootDir,
+                };
+            })
+            .WithHttpsCertificateConfig(cert => new()
+            {
+                CertificatePath = ReferenceExpression.Create($"{Path.Join(baseServerAuthOutputPath, $"{cert.Thumbprint}.crt")}"),
+                KeyPath = ReferenceExpression.Create($"{Path.Join(baseServerAuthOutputPath, $"{cert.Thumbprint}.key")}"),
+                PfxPath = ReferenceExpression.Create($"{Path.Join(baseServerAuthOutputPath, $"{cert.Thumbprint}.pfx")}"),
+            })
+            .BuildAsync(_executionContext, resourceLogger, cancellationToken)
+            .ConfigureAwait(false);
+
+        // Add the certificates to the executable spec so they'll be placed in the DCP config
+        ExecutablePemCertificates? pemCertificates = null;
+        if (configuration.TryGetAdditionalData<CertificateTrustExecutionConfigurationData>(out var certificateTrustConfiguration)
+            && certificateTrustConfiguration.Scope != CertificateTrustScope.None
+            && certificateTrustConfiguration.Certificates.Count > 0)
+        {
+            pemCertificates = new ExecutablePemCertificates
+            {
+                Certificates = BuildPemCertificateList(certificateTrustConfiguration.Certificates),
+                ContinueOnError = true,
+            };
+
+            if (certificateTrustConfiguration.CustomBundlesFactories.Count > 0)
+            {
+                Directory.CreateDirectory(customBundleOutputPath);
+            }
+
+            foreach (var bundleFactory in certificateTrustConfiguration.CustomBundlesFactories)
+            {
+                var bundleId = bundleFactory.Key;
+                var bundleBytes = await bundleFactory.Value(certificateTrustConfiguration.Certificates, cancellationToken).ConfigureAwait(false);
+
+                File.WriteAllBytes(Path.Join(customBundleOutputPath, bundleId), bundleBytes);
+            }
+        }
+
+        if (configuration.TryGetAdditionalData<HttpsCertificateExecutionConfigurationData>(out var tlsCertificateConfiguration))
+        {
+            var thumbprint = tlsCertificateConfiguration.Certificate.Thumbprint;
+            var publicCetificatePem = tlsCertificateConfiguration.Certificate.ExportCertificatePem();
+            (var keyPem, var pfxBytes) = await GetCertificateKeyMaterialAsync(tlsCertificateConfiguration, cancellationToken).ConfigureAwait(false);
+
+            if (OperatingSystem.IsWindows())
+            {
+                Directory.CreateDirectory(baseServerAuthOutputPath);
+            }
+            else
+            {
+                Directory.CreateDirectory(baseServerAuthOutputPath, UnixFileMode.UserExecute | UnixFileMode.UserWrite | UnixFileMode.UserRead);
+            }
+
+            File.WriteAllText(Path.Join(baseServerAuthOutputPath, $"{thumbprint}.crt"), publicCetificatePem);
+
+            if (keyPem is not null)
+            {
+                var keyBytes = Encoding.ASCII.GetBytes(keyPem);
+
+                // Write each of the certificate, key, and PFX assets to the temp folder
+                File.WriteAllBytes(Path.Join(baseServerAuthOutputPath, $"{thumbprint}.key"), keyBytes);
+
+                Array.Clear(keyPem, 0, keyPem.Length);
+                Array.Clear(keyBytes, 0, keyBytes.Length);
+            }
+
+            if (pfxBytes is not null)
+            {
+                File.WriteAllBytes(Path.Join(baseServerAuthOutputPath, $"{thumbprint}.pfx"), pfxBytes);
+                Array.Clear(pfxBytes, 0, pfxBytes.Length);
+            }
+        }
+
+        return (configuration, pemCertificates);
     }
 
     private static List<(string Value, bool IsSensitive, bool Executable, bool Display)> BuildLaunchArgs(RenderedModelResource er, ExecutableSpec spec, IEnumerable<(string Value, bool IsSensitive)> appHostArgs)
@@ -1757,14 +1760,7 @@ internal sealed partial class DcpExecutor : IDcpExecutor, IAsyncDisposable
         {
             pemCertificates = new ContainerPemCertificates
             {
-                Certificates = certificateTrustConfiguration.Certificates.Select(c =>
-                {
-                    return new PemCertificate
-                    {
-                        Thumbprint = c.Thumbprint,
-                        Contents = c.ExportCertificatePem(),
-                    };
-                }).DistinctBy(cert => cert.Thumbprint).ToList(),
+                Certificates = BuildPemCertificateList(certificateTrustConfiguration.Certificates),
                 Destination = certificatesDestination,
                 ContinueOnError = true,
             };
@@ -2491,6 +2487,15 @@ internal sealed partial class DcpExecutor : IDcpExecutor, IAsyncDisposable
         }
 
         return (pemKey, pfxBytes);
+    }
+
+    private static List<PemCertificate> BuildPemCertificateList(X509Certificate2Collection certificates)
+    {
+        return certificates.Select(c => new PemCertificate
+        {
+            Thumbprint = c.Thumbprint,
+            Contents = c.ExportCertificatePem(),
+        }).DistinctBy(cert => cert.Thumbprint).ToList();
     }
 
     private static List<ContainerPortSpec> BuildContainerPorts(RenderedModelResource cr)
