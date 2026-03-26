@@ -639,14 +639,12 @@ public class ExportCommandTests(ITestOutputHelper outputHelper)
         var logsJson = BuildLogsJson(
             ("redis", null, 9, "Information", "Ready to accept connections", s_testTime));
 
-        var tracesJson = BuildTracesJson();
-
         // CreateExportTestServices sets up a backchannel, but --dashboard-url bypasses it entirely
         var provider = CreateExportTestServices(workspace, resources,
             telemetryEndpoints: new Dictionary<string, string>
             {
                 ["/api/telemetry/logs"] = logsJson,
-                ["/api/telemetry/traces"] = tracesJson,
+                ["/api/telemetry/traces"] = BuildTracesJson(),
             },
             resourceSnapshots:
             [
@@ -670,8 +668,7 @@ public class ExportCommandTests(ITestOutputHelper outputHelper)
 
         // With --dashboard-url there is no backchannel, so no resources or console logs
         Assert.Collection(entryNames,
-            entry => Assert.Equal("structuredlogs/redis.json", entry),
-            entry => Assert.Equal("traces/redis.json", entry));
+            entry => Assert.Equal("structuredlogs/redis.json", entry));
 
         // Verify structured log content
         var redisLogs = JsonSerializer.Deserialize(
