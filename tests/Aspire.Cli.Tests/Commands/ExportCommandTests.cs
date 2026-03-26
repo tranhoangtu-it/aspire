@@ -639,12 +639,14 @@ public class ExportCommandTests(ITestOutputHelper outputHelper)
         var logsJson = BuildLogsJson(
             ("redis", null, 9, "Information", "Ready to accept connections", s_testTime));
 
+        var tracesJson = BuildTracesJson();
+
         // CreateExportTestServices sets up a backchannel, but --dashboard-url bypasses it entirely
         var provider = CreateExportTestServices(workspace, resources,
             telemetryEndpoints: new Dictionary<string, string>
             {
                 ["/api/telemetry/logs"] = logsJson,
-                ["/api/telemetry/traces"] = "{}",
+                ["/api/telemetry/traces"] = tracesJson,
             },
             resourceSnapshots:
             [
