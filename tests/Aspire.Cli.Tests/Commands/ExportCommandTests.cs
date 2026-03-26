@@ -626,6 +626,98 @@ public class ExportCommandTests(ITestOutputHelper outputHelper)
     }
 
     [Fact]
+    public async Task ExportCommand_DashboardUrl_ExportsTelemetryData()
+    {
+        using var workspace = TemporaryWorkspace.Create(outputHelper);
+        var outputPath = Path.Combine(workspace.WorkspaceRoot.FullName, "export.zip");
+
+        var resources = new[]
+        {
+            new ResourceInfoJson { Name = "redis", InstanceId = null },
+            new ResourceInfoJson { Name = "apiservice", InstanceId = null },
+        };
+
+        var resourcesJson = JsonSerializer.Serialize(resources, OtlpJsonSerializerContext.Default.ResourceInfoJsonArray);
+
+        var logsJson = BuildLogsJson(
+            ("redis", null, 9, "Information", "Ready to accept connections", s_testTime),
+            ("apiservice", null, 9, "Information", "Request received", s_testTime.AddSeconds(1)));
+
+        var tracesJson = BuildTracesJson(
+            ("apiservice", null, "span001", "GET /api/products", s_testTime, s_testTime.AddMilliseconds(50), false));
+
+        var handler = new MockHttpMessageHandler(request =>
+        {
+            var url = request.RequestUri!.ToString();
+            if (url.Contains("/api/telemetry/resources"))
+            {
+                return new System.Net.Http.HttpResponseMessage(System.Net.HttpStatusCode.OK)
+                {
+                    Content = new StringContent(resourcesJson, System.Text.Encoding.UTF8, "application/json")
+                };
+            }
+            if (url.Contains("/api/telemetry/logs"))
+            {
+                return new System.Net.Http.HttpResponseMessage(System.Net.HttpStatusCode.OK)
+                {
+                    Content = new StringContent(logsJson, System.Text.Encoding.UTF8, "application/json")
+                };
+            }
+            if (url.Contains("/api/telemetry/traces"))
+            {
+                return new System.Net.Http.HttpResponseMessage(System.Net.HttpStatusCode.OK)
+                {
+                    Content = new StringContent(tracesJson, System.Text.Encoding.UTF8, "application/json")
+                };
+            }
+            return new System.Net.Http.HttpResponseMessage(System.Net.HttpStatusCode.NotFound);
+        });
+
+        var services = CliTestHelper.CreateServiceCollection(workspace, outputHelper, options =>
+        {
+            options.DisableAnsi = true;
+        });
+
+        services.AddSingleton(handler);
+        services.Replace(ServiceDescriptor.Singleton<IHttpClientFactory>(new MockHttpClientFactory(handler)));
+
+        var provider = services.BuildServiceProvider();
+
+        var command = provider.GetRequiredService<RootCommand>();
+        var result = command.Parse($"export --dashboard-url http://localhost:18888 --api-key test-token --output {outputPath}");
+
+        var exitCode = await result.InvokeAsync().DefaultTimeout();
+
+        Assert.Equal(ExitCodeConstants.Success, exitCode);
+        Assert.True(File.Exists(outputPath), "Export zip file should be created");
+
+        using var archive = ZipFile.OpenRead(outputPath);
+        var entryNames = archive.Entries.Select(e => e.FullName).OrderBy(n => n).ToList();
+
+        // With --dashboard-url there is no backchannel, so no resources or console logs
+        Assert.Collection(entryNames,
+            entry => Assert.Equal("structuredlogs/apiservice.json", entry),
+            entry => Assert.Equal("structuredlogs/redis.json", entry),
+            entry => Assert.Equal("traces/apiservice.json", entry));
+
+        // Verify structured log content
+        var redisLogs = JsonSerializer.Deserialize(
+            ReadEntryText(archive, "structuredlogs/redis.json"),
+            OtlpJsonSerializerContext.Default.OtlpTelemetryDataJson);
+        Assert.NotNull(redisLogs?.ResourceLogs);
+        Assert.Single(redisLogs.ResourceLogs);
+
+        // Verify trace content
+        var apiTraces = JsonSerializer.Deserialize(
+            ReadEntryText(archive, "traces/apiservice.json"),
+            OtlpJsonSerializerContext.Default.OtlpTelemetryDataJson);
+        Assert.NotNull(apiTraces?.ResourceSpans);
+        Assert.Single(apiTraces.ResourceSpans);
+        var span = Assert.Single(apiTraces.ResourceSpans[0].ScopeSpans![0].Spans!);
+        Assert.Equal("GET /api/products", span.Name);
+    }
+
+    [Fact]
     public async Task ExportCommand_DashboardUnavailable_ExportsResourcesAndConsoleLogs()
     {
         using var workspace = TemporaryWorkspace.Create(outputHelper);
