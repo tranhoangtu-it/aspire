@@ -5,6 +5,7 @@ using System.Net;
 using System.Text.Json;
 using Aspire.Cli.Commands;
 using Aspire.Cli.Resources;
+using Aspire.Cli.Tests.TestServices;
 using Aspire.Cli.Tests.Utils;
 using Aspire.Dashboard.Utils;
 using Aspire.Otlp.Serialization;
@@ -202,12 +203,12 @@ public class TelemetrySpansCommandTests(ITestOutputHelper outputHelper)
     public async Task TelemetrySpansCommand_WithDashboardUrlAndAppHost_ReturnsInvalidCommand()
     {
         using var workspace = TemporaryWorkspace.Create(outputHelper);
-        var outputWriter = new TestOutputTextWriter(outputHelper);
+
+        var testInteractionService = new TestInteractionService();
 
         var services = CliTestHelper.CreateServiceCollection(workspace, outputHelper, options =>
         {
-            options.OutputTextWriter = outputWriter;
-            options.DisableAnsi = true;
+            options.InteractionServiceFactory = _ => testInteractionService;
         });
 
         var provider = services.BuildServiceProvider();
@@ -217,14 +218,16 @@ public class TelemetrySpansCommandTests(ITestOutputHelper outputHelper)
         var exitCode = await result.InvokeAsync().DefaultTimeout();
 
         Assert.Equal(ExitCodeConstants.InvalidCommand, exitCode);
-        Assert.Contains(outputWriter.Logs, l => l.Contains(TelemetryCommandStrings.DashboardUrlAndAppHostExclusive));
+        var errorMessage = Assert.Single(testInteractionService.DisplayedErrors);
+        Assert.Equal(TelemetryCommandStrings.DashboardUrlAndAppHostExclusive, errorMessage);
     }
 
     [Fact]
     public async Task TelemetrySpansCommand_WithDashboardUrl_401_DisplaysAuthFailedMessage()
     {
         using var workspace = TemporaryWorkspace.Create(outputHelper);
-        var outputWriter = new TestOutputTextWriter(outputHelper);
+
+        var testInteractionService = new TestInteractionService();
 
         var handler = new MockHttpMessageHandler(request =>
         {
@@ -241,8 +244,7 @@ public class TelemetrySpansCommandTests(ITestOutputHelper outputHelper)
 
         var services = CliTestHelper.CreateServiceCollection(workspace, outputHelper, options =>
         {
-            options.OutputTextWriter = outputWriter;
-            options.DisableAnsi = true;
+            options.InteractionServiceFactory = _ => testInteractionService;
         });
         services.AddSingleton(handler);
         services.Replace(ServiceDescriptor.Singleton<IHttpClientFactory>(new MockHttpClientFactory(handler)));
@@ -254,6 +256,7 @@ public class TelemetrySpansCommandTests(ITestOutputHelper outputHelper)
         var exitCode = await result.InvokeAsync().DefaultTimeout();
 
         Assert.Equal(ExitCodeConstants.DashboardFailure, exitCode);
-        Assert.Contains(outputWriter.Logs, l => l.Contains("--api-key"));
+        var errorMessage = Assert.Single(testInteractionService.DisplayedErrors);
+        Assert.Equal(TelemetryCommandStrings.DashboardAuthFailed, errorMessage);
     }
 }

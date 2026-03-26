@@ -253,15 +253,11 @@ public class TelemetryLogsCommandTests(ITestOutputHelper outputHelper)
     {
         using var workspace = TemporaryWorkspace.Create(outputHelper);
 
-        TestInteractionService? testInteractionService = null;
+        var testInteractionService = new TestInteractionService();
 
         var services = CliTestHelper.CreateServiceCollection(workspace, outputHelper, options =>
         {
-            options.InteractionServiceFactory = _ =>
-            {
-                testInteractionService = new TestInteractionService();
-                return testInteractionService;
-            };
+            options.InteractionServiceFactory = _ => testInteractionService;
         });
 
         var provider = services.BuildServiceProvider();
@@ -271,7 +267,6 @@ public class TelemetryLogsCommandTests(ITestOutputHelper outputHelper)
         var exitCode = await result.InvokeAsync().DefaultTimeout();
 
         Assert.Equal(ExitCodeConstants.InvalidCommand, exitCode);
-        Assert.NotNull(testInteractionService);
         var errorMessage = Assert.Single(testInteractionService.DisplayedErrors);
         Assert.Equal(TelemetryCommandStrings.DashboardUrlAndAppHostExclusive, errorMessage);
     }
@@ -281,15 +276,11 @@ public class TelemetryLogsCommandTests(ITestOutputHelper outputHelper)
     {
         using var workspace = TemporaryWorkspace.Create(outputHelper);
 
-        TestInteractionService? testInteractionService = null;
+        var testInteractionService = new TestInteractionService();
 
         var services = CliTestHelper.CreateServiceCollection(workspace, outputHelper, options =>
         {
-            options.InteractionServiceFactory = _ =>
-            {
-                testInteractionService = new TestInteractionService();
-                return testInteractionService;
-            };
+            options.InteractionServiceFactory = _ => testInteractionService;
         });
 
         var provider = services.BuildServiceProvider();
@@ -299,7 +290,6 @@ public class TelemetryLogsCommandTests(ITestOutputHelper outputHelper)
         var exitCode = await result.InvokeAsync().DefaultTimeout();
 
         Assert.Equal(ExitCodeConstants.InvalidCommand, exitCode);
-        Assert.NotNull(testInteractionService);
         var errorMessage = Assert.Single(testInteractionService.DisplayedErrors);
         Assert.Equal(string.Format(CultureInfo.CurrentCulture, TelemetryCommandStrings.DashboardUrlInvalid, "not-a-url"), errorMessage);
     }
@@ -308,7 +298,8 @@ public class TelemetryLogsCommandTests(ITestOutputHelper outputHelper)
     public async Task TelemetryLogsCommand_WithDashboardUrl_401_DisplaysAuthFailedMessage()
     {
         using var workspace = TemporaryWorkspace.Create(outputHelper);
-        var outputWriter = new TestOutputTextWriter(outputHelper);
+
+        var testInteractionService = new TestInteractionService();
 
         var handler = new MockHttpMessageHandler(request =>
         {
@@ -325,8 +316,7 @@ public class TelemetryLogsCommandTests(ITestOutputHelper outputHelper)
 
         var services = CliTestHelper.CreateServiceCollection(workspace, outputHelper, options =>
         {
-            options.OutputTextWriter = outputWriter;
-            options.DisableAnsi = true;
+            options.InteractionServiceFactory = _ => testInteractionService;
         });
         services.AddSingleton(handler);
         services.Replace(ServiceDescriptor.Singleton<IHttpClientFactory>(new MockHttpClientFactory(handler)));
@@ -338,14 +328,16 @@ public class TelemetryLogsCommandTests(ITestOutputHelper outputHelper)
         var exitCode = await result.InvokeAsync().DefaultTimeout();
 
         Assert.Equal(ExitCodeConstants.DashboardFailure, exitCode);
-        Assert.Contains(outputWriter.Logs, l => l.Contains("--api-key"));
+        var errorMessage = Assert.Single(testInteractionService.DisplayedErrors);
+        Assert.Equal(TelemetryCommandStrings.DashboardAuthFailed, errorMessage);
     }
 
     [Fact]
     public async Task TelemetryLogsCommand_WithDashboardUrl_404WithReachableBase_DisplaysApiNotEnabledMessage()
     {
         using var workspace = TemporaryWorkspace.Create(outputHelper);
-        var outputWriter = new TestOutputTextWriter(outputHelper);
+
+        var testInteractionService = new TestInteractionService();
 
         var handler = new MockHttpMessageHandler(request =>
         {
@@ -367,8 +359,7 @@ public class TelemetryLogsCommandTests(ITestOutputHelper outputHelper)
 
         var services = CliTestHelper.CreateServiceCollection(workspace, outputHelper, options =>
         {
-            options.OutputTextWriter = outputWriter;
-            options.DisableAnsi = true;
+            options.InteractionServiceFactory = _ => testInteractionService;
         });
         services.AddSingleton(handler);
         services.Replace(ServiceDescriptor.Singleton<IHttpClientFactory>(new MockHttpClientFactory(handler)));
@@ -380,14 +371,16 @@ public class TelemetryLogsCommandTests(ITestOutputHelper outputHelper)
         var exitCode = await result.InvokeAsync().DefaultTimeout();
 
         Assert.Equal(ExitCodeConstants.DashboardFailure, exitCode);
-        Assert.Contains(outputWriter.Logs, l => l.Contains("Dashboard:Api:Enabled"));
+        var errorMessage = Assert.Single(testInteractionService.DisplayedErrors);
+        Assert.Equal(string.Format(CultureInfo.CurrentCulture, TelemetryCommandStrings.DashboardApiNotEnabled, "http://localhost:18888"), errorMessage);
     }
 
     [Fact]
     public async Task TelemetryLogsCommand_WithDashboardUrl_ConnectionRefused_DisplaysConnectionFailedMessage()
     {
         using var workspace = TemporaryWorkspace.Create(outputHelper);
-        var outputWriter = new TestOutputTextWriter(outputHelper);
+
+        var testInteractionService = new TestInteractionService();
 
         var handler = new MockHttpMessageHandler(request =>
         {
@@ -405,8 +398,7 @@ public class TelemetryLogsCommandTests(ITestOutputHelper outputHelper)
 
         var services = CliTestHelper.CreateServiceCollection(workspace, outputHelper, options =>
         {
-            options.OutputTextWriter = outputWriter;
-            options.DisableAnsi = true;
+            options.InteractionServiceFactory = _ => testInteractionService;
         });
         services.AddSingleton(handler);
         services.Replace(ServiceDescriptor.Singleton<IHttpClientFactory>(new MockHttpClientFactory(handler)));
@@ -418,6 +410,7 @@ public class TelemetryLogsCommandTests(ITestOutputHelper outputHelper)
         var exitCode = await result.InvokeAsync().DefaultTimeout();
 
         Assert.Equal(ExitCodeConstants.DashboardFailure, exitCode);
-        Assert.Contains(outputWriter.Logs, l => l.Contains("Could not connect"));
+        var errorMessage = Assert.Single(testInteractionService.DisplayedErrors);
+        Assert.Equal(string.Format(CultureInfo.CurrentCulture, TelemetryCommandStrings.DashboardConnectionFailed, "http://localhost:18888"), errorMessage);
     }
 }

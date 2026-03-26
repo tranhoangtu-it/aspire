@@ -135,18 +135,15 @@ internal static class TelemetryCommandHelpers
             return (false, null, null, null, ExitCodeConstants.InvalidCommand);
         }
 
-        // Validate dashboard URL format and scheme
-        if (dashboardUrl is not null &&
-            (!Uri.TryCreate(dashboardUrl, UriKind.Absolute, out var parsedUri) ||
-             (parsedUri.Scheme != Uri.UriSchemeHttp && parsedUri.Scheme != Uri.UriSchemeHttps)))
-        {
-            interactionService.DisplayError(string.Format(CultureInfo.CurrentCulture, TelemetryCommandStrings.DashboardUrlInvalid, dashboardUrl));
-            return (false, null, null, null, ExitCodeConstants.InvalidCommand);
-        }
-
         // Direct dashboard URL mode — bypass AppHost discovery
         if (dashboardUrl is not null)
         {
+            if (!UrlHelper.IsHttpUrl(dashboardUrl))
+            {
+                interactionService.DisplayError(string.Format(CultureInfo.CurrentCulture, TelemetryCommandStrings.DashboardUrlInvalid, dashboardUrl));
+                return (false, null, null, null, ExitCodeConstants.InvalidCommand);
+            }
+
             var token = apiKey ?? string.Empty;
             return (true, dashboardUrl, token, dashboardUrl, 0);
         }
