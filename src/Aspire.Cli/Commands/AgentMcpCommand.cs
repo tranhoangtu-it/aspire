@@ -102,10 +102,14 @@ internal sealed class AgentMcpCommand : BaseCommand
 
         if (dashboardUrl is not null)
         {
+            if (!Uri.TryCreate(dashboardUrl, UriKind.Absolute, out _))
+            {
+                _logger.LogError("Invalid --dashboard-url: {DashboardUrl}", dashboardUrl);
+                return ExitCodeConstants.InvalidCommand;
+            }
+
             _dashboardOnlyMode = true;
-            var uri = new Uri(dashboardUrl);
-            var baseUrl = $"{uri.Scheme}://{uri.Authority}";
-            IDashboardInfoProvider staticProvider = new StaticDashboardInfoProvider(baseUrl, apiKey);
+            var staticProvider = new StaticDashboardInfoProvider(dashboardUrl, apiKey);
 
             _knownTools[KnownMcpTools.ListStructuredLogs] = new ListStructuredLogsTool(staticProvider, _httpClientFactory, _loggerFactory.CreateLogger<ListStructuredLogsTool>());
             _knownTools[KnownMcpTools.ListTraces] = new ListTracesTool(staticProvider, _httpClientFactory, _loggerFactory.CreateLogger<ListTracesTool>());
@@ -113,7 +117,7 @@ internal sealed class AgentMcpCommand : BaseCommand
         }
         else
         {
-            IDashboardInfoProvider dashboardInfoProvider = new BackchannelDashboardInfoProvider(_auxiliaryBackchannelMonitor, _logger);
+            var dashboardInfoProvider = new BackchannelDashboardInfoProvider(_auxiliaryBackchannelMonitor, _logger);
 
             _knownTools[KnownMcpTools.ListResources] = new ListResourcesTool(_auxiliaryBackchannelMonitor, _loggerFactory.CreateLogger<ListResourcesTool>());
             _knownTools[KnownMcpTools.ListConsoleLogs] = new ListConsoleLogsTool(_auxiliaryBackchannelMonitor, _loggerFactory.CreateLogger<ListConsoleLogsTool>());

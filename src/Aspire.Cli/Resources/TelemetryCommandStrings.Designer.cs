@@ -290,5 +290,11 @@ namespace Aspire.Cli.Resources {
                 return ResourceManager.GetString("DashboardConnectionFailed", resourceCulture);
             }
         }
+
+        internal static string DashboardUrlInvalid {
+            get {
+                return ResourceManager.GetString("DashboardUrlInvalid", resourceCulture);
+            }
+        }
     }
 }

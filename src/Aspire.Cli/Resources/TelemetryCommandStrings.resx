@@ -207,4 +207,7 @@
   <data name="DashboardConnectionFailed" xml:space="preserve">
     <value>Could not connect to the dashboard at '{0}'. Verify the dashboard is running and the URL is correct.</value>
   </data>
+  <data name="DashboardUrlInvalid" xml:space="preserve">
+    <value>The value '{0}' is not a valid URL. Specify an absolute URL like 'http://localhost:18888'.</value>
+  </data>
 </root>

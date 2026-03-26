@@ -1,10 +1,12 @@
 // Licensed to the .NET Foundation under one or more agreements.
 // The .NET Foundation licenses this file to you under the MIT license.
 
+using System.Globalization;
 using System.Net;
 using System.Text.Json;
 using Aspire.Cli.Commands;
 using Aspire.Cli.Resources;
+using Aspire.Cli.Tests.TestServices;
 using Aspire.Cli.Tests.Utils;
 using Aspire.Dashboard.Utils;
 using Aspire.Otlp.Serialization;
@@ -250,12 +252,16 @@ public class TelemetryLogsCommandTests(ITestOutputHelper outputHelper)
     public async Task TelemetryLogsCommand_WithDashboardUrlAndAppHost_ReturnsInvalidCommand()
     {
         using var workspace = TemporaryWorkspace.Create(outputHelper);
-        var outputWriter = new TestOutputTextWriter(outputHelper);
+
+        TestInteractionService? testInteractionService = null;
 
         var services = CliTestHelper.CreateServiceCollection(workspace, outputHelper, options =>
         {
-            options.OutputTextWriter = outputWriter;
-            options.DisableAnsi = true;
+            options.InteractionServiceFactory = _ =>
+            {
+                testInteractionService = new TestInteractionService();
+                return testInteractionService;
+            };
         });
 
         var provider = services.BuildServiceProvider();
@@ -265,7 +271,37 @@ public class TelemetryLogsCommandTests(ITestOutputHelper outputHelper)
         var exitCode = await result.InvokeAsync().DefaultTimeout();
 
         Assert.Equal(ExitCodeConstants.InvalidCommand, exitCode);
-        Assert.Contains(outputWriter.Logs, l => l.Contains(TelemetryCommandStrings.DashboardUrlAndAppHostExclusive));
+        Assert.NotNull(testInteractionService);
+        var errorMessage = Assert.Single(testInteractionService.DisplayedErrors);
+        Assert.Equal(TelemetryCommandStrings.DashboardUrlAndAppHostExclusive, errorMessage);
+    }
+
+    [Fact]
+    public async Task TelemetryLogsCommand_WithInvalidDashboardUrl_ReturnsInvalidCommand()
+    {
+        using var workspace = TemporaryWorkspace.Create(outputHelper);
+
+        TestInteractionService? testInteractionService = null;
+
+        var services = CliTestHelper.CreateServiceCollection(workspace, outputHelper, options =>
+        {
+            options.InteractionServiceFactory = _ =>
+            {
+                testInteractionService = new TestInteractionService();
+                return testInteractionService;
+            };
+        });
+
+        var provider = services.BuildServiceProvider();
+        var command = provider.GetRequiredService<RootCommand>();
+        var result = command.Parse("otel logs --dashboard-url not-a-url");
+
+        var exitCode = await result.InvokeAsync().DefaultTimeout();
+
+        Assert.Equal(ExitCodeConstants.InvalidCommand, exitCode);
+        Assert.NotNull(testInteractionService);
+        var errorMessage = Assert.Single(testInteractionService.DisplayedErrors);
+        Assert.Equal(string.Format(CultureInfo.CurrentCulture, TelemetryCommandStrings.DashboardUrlInvalid, "not-a-url"), errorMessage);
     }
 
     [Fact]

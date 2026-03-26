@@ -7,6 +7,7 @@ using System.Net;
 using System.Net.Http.Json;
 using Aspire.Cli.Backchannel;
 using Aspire.Cli.Interaction;
+using Aspire.Cli.Mcp.Tools;
 using Aspire.Cli.Resources;
 using Aspire.Cli.Utils;
 using Aspire.Dashboard.Otlp.Model;
@@ -134,13 +135,18 @@ internal static class TelemetryCommandHelpers
             return (false, null, null, null, ExitCodeConstants.InvalidCommand);
         }
 
+        // Validate dashboard URL format
+        if (dashboardUrl is not null && !Uri.TryCreate(dashboardUrl, UriKind.Absolute, out _))
+        {
+            interactionService.DisplayError(string.Format(CultureInfo.CurrentCulture, TelemetryCommandStrings.DashboardUrlInvalid, dashboardUrl));
+            return (false, null, null, null, ExitCodeConstants.InvalidCommand);
+        }
+
         // Direct dashboard URL mode — bypass AppHost discovery
         if (dashboardUrl is not null)
         {
-            var uri = new Uri(dashboardUrl);
-            var baseUrl = $"{uri.Scheme}://{uri.Authority}";
             var token = apiKey ?? string.Empty;
-            return (true, baseUrl, token, baseUrl, 0);
+            return (true, dashboardUrl, token, dashboardUrl, 0);
         }
 
         var result = await connectionResolver.ResolveConnectionAsync(
@@ -170,19 +176,11 @@ internal static class TelemetryCommandHelpers
     }
 
     /// <summary>
-    /// Extracts the base URL from a dashboard URL (removes /login?t=... path).
+    /// Strips the /login path segment from a dashboard URL returned by the AppHost.
     /// </summary>
     private static string? ExtractDashboardBaseUrl(string? dashboardUrlWithToken)
     {
-        if (string.IsNullOrEmpty(dashboardUrlWithToken))
-        {
-            return null;
-        }
-
-        // Dashboard URLs look like: http://localhost:18888/login?t=abcd1234
-        // We want: http://localhost:18888
-        var uri = new Uri(dashboardUrlWithToken);
-        return $"{uri.Scheme}://{uri.Authority}";
+        return McpToolHelpers.StripLoginPath(dashboardUrlWithToken);
     }
 
     /// <summary>

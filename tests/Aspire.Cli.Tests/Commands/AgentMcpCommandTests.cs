@@ -566,6 +566,23 @@ public class AgentMcpCommandTests(ITestOutputHelper outputHelper)
         Assert.Equal(McpErrorCode.MethodNotFound, exception.ErrorCode);
     }
 
+    [Fact]
+    public async Task McpServer_WithInvalidDashboardUrl_ReturnsInvalidCommand()
+    {
+        using var workspace = TemporaryWorkspace.Create(outputHelper);
+        var services = CliTestHelper.CreateServiceCollection(workspace, outputHelper);
+        var serviceProvider = services.BuildServiceProvider();
+        await using var _ = serviceProvider;
+
+        var agentMcpCommand = serviceProvider.GetRequiredService<AgentMcpCommand>();
+        var rootCommand = serviceProvider.GetRequiredService<RootCommand>();
+        var parseResult = rootCommand.Parse("agent mcp --dashboard-url not-a-url");
+
+        var exitCode = await agentMcpCommand.ExecuteCommandAsync(parseResult, CancellationToken.None).DefaultTimeout();
+
+        Assert.Equal(ExitCodeConstants.InvalidCommand, exitCode);
+    }
+
     private static string GetResultText(CallToolResult result)
     {
         if (result.Content?.FirstOrDefault() is TextContentBlock textContent)
