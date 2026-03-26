@@ -3,6 +3,7 @@
 
 using System.CommandLine;
 using System.Globalization;
+using System.Net;
 using System.Net.Http.Json;
 using Aspire.Cli.Backchannel;
 using Aspire.Cli.Interaction;
@@ -12,6 +13,7 @@ using Aspire.Dashboard.Otlp.Model;
 using Aspire.Dashboard.Utils;
 using Aspire.Otlp.Serialization;
 using Aspire.Shared;
+using Microsoft.Extensions.Logging;
 using Spectre.Console;
 
 namespace Aspire.Cli.Commands;
@@ -84,6 +86,22 @@ internal static class TelemetryCommandHelpers
         Description = TelemetryCommandStrings.HasErrorOptionDescription
     };
 
+    /// <summary>
+    /// Dashboard URL option for connecting directly to a standalone dashboard.
+    /// </summary>
+    internal static Option<string?> CreateDashboardUrlOption() => new("--dashboard-url")
+    {
+        Description = TelemetryCommandStrings.DashboardUrlOptionDescription
+    };
+
+    /// <summary>
+    /// API key option for authenticating with a standalone dashboard.
+    /// </summary>
+    internal static Option<string?> CreateApiKeyOption() => new("--api-key")
+    {
+        Description = TelemetryCommandStrings.ApiKeyOptionDescription
+    };
+
     #endregion
 
     /// <summary>
@@ -105,8 +123,26 @@ internal static class TelemetryCommandHelpers
         AppHostConnectionResolver connectionResolver,
         IInteractionService interactionService,
         FileInfo? projectFile,
+        string? dashboardUrl,
+        string? apiKey,
         CancellationToken cancellationToken)
     {
+        // Validate mutual exclusivity of --apphost and --dashboard-url
+        if (projectFile is not null && dashboardUrl is not null)
+        {
+            interactionService.DisplayError(TelemetryCommandStrings.DashboardUrlAndAppHostExclusive);
+            return (false, null, null, null, ExitCodeConstants.InvalidCommand);
+        }
+
+        // Direct dashboard URL mode — bypass AppHost discovery
+        if (dashboardUrl is not null)
+        {
+            var uri = new Uri(dashboardUrl);
+            var baseUrl = $"{uri.Scheme}://{uri.Authority}";
+            var token = apiKey ?? string.Empty;
+            return (true, baseUrl, token, baseUrl, 0);
+        }
+
         var result = await connectionResolver.ResolveConnectionAsync(
             projectFile,
             SharedCommandStrings.ScanningForRunningAppHosts,
@@ -128,9 +164,9 @@ internal static class TelemetryCommandHelpers
         }
 
         // Extract dashboard base URL (without /login path) for hyperlinks
-        var dashboardUrl = ExtractDashboardBaseUrl(dashboardInfo.DashboardUrls?.FirstOrDefault());
+        var extractedDashboardUrl = ExtractDashboardBaseUrl(dashboardInfo.DashboardUrls?.FirstOrDefault());
 
-        return (true, dashboardInfo.ApiBaseUrl, dashboardInfo.ApiToken, dashboardUrl, 0);
+        return (true, dashboardInfo.ApiBaseUrl, dashboardInfo.ApiToken, extractedDashboardUrl, 0);
     }
 
     /// <summary>
@@ -155,8 +191,58 @@ internal static class TelemetryCommandHelpers
     public static HttpClient CreateApiClient(IHttpClientFactory factory, string apiToken)
     {
         var client = factory.CreateClient();
-        client.DefaultRequestHeaders.Add(ApiKeyHeaderName, apiToken);
+        if (!string.IsNullOrEmpty(apiToken))
+        {
+            client.DefaultRequestHeaders.Add(ApiKeyHeaderName, apiToken);
+        }
         return client;
+    }
+
+    /// <summary>
+    /// Produces a user-friendly error message for dashboard API failures when using --dashboard-url.
+    /// </summary>
+    public static async Task<string> GetDashboardApiErrorMessageAsync(
+        HttpRequestException ex,
+        string dashboardBaseUrl,
+        IHttpClientFactory httpClientFactory,
+        ILogger logger,
+        CancellationToken cancellationToken)
+    {
+        if (ex.StatusCode == HttpStatusCode.Unauthorized)
+        {
+            return TelemetryCommandStrings.DashboardAuthFailed;
+        }
+
+        if (ex.StatusCode == HttpStatusCode.NotFound)
+        {
+            // Probe the dashboard base URL to distinguish "wrong URL" from "API not enabled"
+            try
+            {
+                using var probeClient = httpClientFactory.CreateClient();
+                var probeResponse = await probeClient.GetAsync(dashboardBaseUrl, cancellationToken).ConfigureAwait(false);
+
+                if (probeResponse.IsSuccessStatusCode)
+                {
+                    // Dashboard is reachable but the API endpoint returned 404 — API not enabled
+                    return string.Format(CultureInfo.CurrentCulture, TelemetryCommandStrings.DashboardApiNotEnabled, dashboardBaseUrl);
+                }
+            }
+            catch (Exception probeEx)
+            {
+                logger.LogDebug(probeEx, "Dashboard probe failed for {Url}", dashboardBaseUrl);
+            }
+
+            // Dashboard base URL is also not reachable — wrong URL
+            return string.Format(CultureInfo.CurrentCulture, TelemetryCommandStrings.DashboardUrlNotReachable, dashboardBaseUrl);
+        }
+
+        if (ex.StatusCode is null)
+        {
+            // No HTTP status — connection refused or network error
+            return string.Format(CultureInfo.CurrentCulture, TelemetryCommandStrings.DashboardConnectionFailed, dashboardBaseUrl);
+        }
+
+        return string.Format(CultureInfo.CurrentCulture, TelemetryCommandStrings.FailedToFetchTelemetry, ex.Message);
     }
 
     public static bool TryResolveResourceNames(

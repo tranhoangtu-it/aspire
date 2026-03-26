@@ -38,6 +38,8 @@ internal sealed class TelemetrySpansCommand : BaseCommand
     private static readonly Option<int?> s_limitOption = TelemetryCommandHelpers.CreateLimitOption();
     private static readonly Option<string?> s_traceIdOption = TelemetryCommandHelpers.CreateTraceIdOption("--trace-id");
     private static readonly Option<bool?> s_hasErrorOption = TelemetryCommandHelpers.CreateHasErrorOption();
+    private static readonly Option<string?> s_dashboardUrlOption = TelemetryCommandHelpers.CreateDashboardUrlOption();
+    private static readonly Option<string?> s_apiKeyOption = TelemetryCommandHelpers.CreateApiKeyOption();
 
     public TelemetrySpansCommand(
         IInteractionService interactionService,
@@ -66,6 +68,8 @@ internal sealed class TelemetrySpansCommand : BaseCommand
         Options.Add(s_limitOption);
         Options.Add(s_traceIdOption);
         Options.Add(s_hasErrorOption);
+        Options.Add(s_dashboardUrlOption);
+        Options.Add(s_apiKeyOption);
     }
 
     protected override async Task<int> ExecuteAsync(ParseResult parseResult, CancellationToken cancellationToken)
@@ -79,6 +83,8 @@ internal sealed class TelemetrySpansCommand : BaseCommand
         var limit = parseResult.GetValue(s_limitOption);
         var traceId = parseResult.GetValue(s_traceIdOption);
         var hasError = parseResult.GetValue(s_hasErrorOption);
+        var dashboardUrl = parseResult.GetValue(s_dashboardUrlOption);
+        var apiKey = parseResult.GetValue(s_apiKeyOption);
 
         // Validate --limit value
         if (limit.HasValue && limit.Value < 1)
@@ -88,14 +94,14 @@ internal sealed class TelemetrySpansCommand : BaseCommand
         }
 
         var (success, baseUrl, apiToken, _, exitCode) = await TelemetryCommandHelpers.GetDashboardApiAsync(
-            _connectionResolver, _interactionService, passedAppHostProjectFile, cancellationToken);
+            _connectionResolver, _interactionService, passedAppHostProjectFile, dashboardUrl, apiKey, cancellationToken);
 
         if (!success)
         {
             return exitCode;
         }
 
-        return await FetchSpansAsync(baseUrl!, apiToken!, resourceName, traceId, hasError, limit, follow, format, cancellationToken);
+        return await FetchSpansAsync(baseUrl!, apiToken!, resourceName, traceId, hasError, limit, follow, format, dashboardUrl, cancellationToken);
     }
 
     private async Task<int> FetchSpansAsync(
@@ -107,6 +113,7 @@ internal sealed class TelemetrySpansCommand : BaseCommand
         int? limit,
         bool follow,
         OutputFormat format,
+        string? dashboardUrl,
         CancellationToken cancellationToken)
     {
         using var client = TelemetryCommandHelpers.CreateApiClient(_httpClientFactory, apiToken);
@@ -161,7 +168,17 @@ internal sealed class TelemetrySpansCommand : BaseCommand
         catch (HttpRequestException ex)
         {
             _logger.LogError(ex, "Failed to fetch spans from Dashboard API");
-            _interactionService.DisplayError(string.Format(CultureInfo.CurrentCulture, TelemetryCommandStrings.FailedToFetchTelemetry, ex.Message));
+
+            if (dashboardUrl is not null)
+            {
+                var errorMessage = await TelemetryCommandHelpers.GetDashboardApiErrorMessageAsync(ex, baseUrl, _httpClientFactory, _logger, cancellationToken);
+                _interactionService.DisplayError(errorMessage);
+            }
+            else
+            {
+                _interactionService.DisplayError(string.Format(CultureInfo.CurrentCulture, TelemetryCommandStrings.FailedToFetchTelemetry, ex.Message));
+            }
+
             return ExitCodeConstants.DashboardFailure;
         }
     }
