@@ -7,14 +7,10 @@
 
 using System.Collections.Concurrent;
 using System.Collections.Immutable;
-using System.Data;
 using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
 using System.Net;
-using System.Net.Sockets;
-using System.Security.Cryptography;
-using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
@@ -50,9 +46,6 @@ internal sealed partial class DcpExecutor : IDcpExecutor, IAsyncDisposable
     // it probably means DCP crashed and there is no point trying further.
     private static readonly TimeSpan s_disposeTimeout = TimeSpan.FromSeconds(10);
 
-    // Well-known location on disk where dev-cert key material is cached.
-    private static readonly string s_macOSUserDevCertificateLocation = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".aspire", "dev-certs", "https");
-
     // Regex for normalizing application names.
     [GeneratedRegex("""^(?<name>.+?)\.?AppHost$""", RegexOptions.ExplicitCapture | RegexOptions.IgnoreCase | RegexOptions.Singleline | RegexOptions.CultureInvariant)]
     private static partial Regex ApplicationNameRegex();
@@ -81,9 +74,10 @@ internal sealed partial class DcpExecutor : IDcpExecutor, IAsyncDisposable
     private readonly DcpExecutorEvents _executorEvents;
     private readonly Locations _locations;
     private readonly DcpResourceWatcher _resourceWatcher;
-    private readonly SemaphoreSlim _serverCertificateCacheSemaphore = new(1, 1);
 
     private readonly string _normalizedApplicationName;
+    private readonly ExecutableCreator _executableCreator;
+    private readonly ContainerCreator _containerCreator;
 
     // Internal for testing.
     internal ResiliencePipeline<bool> DeleteResourceRetryPipeline { get; set; }
@@ -105,7 +99,9 @@ internal sealed partial class DcpExecutor : IDcpExecutor, IAsyncDisposable
                        IDcpDependencyCheckService dcpDependencyCheckService,
                        DcpNameGenerator nameGenerator,
                        DcpExecutorEvents executorEvents,
-                       Locations locations)
+                       Locations locations,
+                       ExecutableCreator executableCreator,
+                       ContainerCreator containerCreator)
     {
         _distributedApplicationLogger = distributedApplicationLogger;
         _kubernetesService = kubernetesService;
@@ -126,7 +122,18 @@ internal sealed partial class DcpExecutor : IDcpExecutor, IAsyncDisposable
         _resourceWatcher = new DcpResourceWatcher(logger, kubernetesService, loggerService, executorEvents, model, _appResources, _shutdownCancellation.Token);
 
         DeleteResourceRetryPipeline = DcpPipelineBuilder.BuildDeleteRetryPipeline(logger);
+
+        _executableCreator = executableCreator;
+        _containerCreator = containerCreator;
+        _executableCreator.Initialize(this);
+        _containerCreator.Initialize(this);
     }
+
+    // ── IDcpExecutor new members ──
+
+    ConcurrentBag<AppResource> IDcpExecutor.AppResources => _appResources;
+    CancellationToken IDcpExecutor.ShutdownToken => _shutdownCancellation.Token;
+    ResourceSnapshotBuilder IDcpExecutor.SnapshotBuilder => _resourceWatcher.SnapshotBuilder;
 
     private string ContainerHostName => _configuration["AppHost:ContainerHostname"] ??
         (_options.Value.EnableAspireContainerTunnel ? KnownHostNames.DefaultContainerTunnelHostName : _dcpInfo?.Containers?.HostName ?? KnownHostNames.DockerDesktopHostBridge);
@@ -149,7 +156,7 @@ internal sealed partial class DcpExecutor : IDcpExecutor, IAsyncDisposable
         {
             AspireEventSource.Instance.DcpModelCreationStart();
 
-            PrepareContainerNetworks();
+            _containerCreator.PrepareContainerNetworks();
 
             AspireEventSource.Instance.DcpServiceObjectPreparationStart();
             try
@@ -161,8 +168,9 @@ internal sealed partial class DcpExecutor : IDcpExecutor, IAsyncDisposable
                 AspireEventSource.Instance.DcpServiceObjectPreparationStop();
             }
 
-            PrepareContainers();
-            PrepareExecutables();
+            _containerCreator.PrepareContainers();
+            _containerCreator.PrepareContainerExecutables();
+            _executableCreator.PrepareExecutables();
 
             await _executorEvents.PublishAsync(new OnResourcesPreparedContext(ct)).ConfigureAwait(false);
 
@@ -197,7 +205,7 @@ internal sealed partial class DcpExecutor : IDcpExecutor, IAsyncDisposable
             {
                 await createExecutableEndpoints.ConfigureAwait(false);
 
-                await CreateExecutablesAsync(executables, ct).ConfigureAwait(false);
+                await CreateRenderedResourcesAsync(_executableCreator.CreateExecutableAsync, executables, Model.Dcp.ExecutableKind, ct).ConfigureAwait(false);
             }, ct);
 
             Task createTunnelFunc(ContainerCreationContext cctx) => Task.Run(async () =>
@@ -217,7 +225,7 @@ internal sealed partial class DcpExecutor : IDcpExecutor, IAsyncDisposable
 
                 var tunnels = containerNetworkServices.Where(s => s.TunnelConfig is not null).Select(s => s.TunnelConfig!).ToList();
                 Debug.Assert(tunnels.Count == containerNetworkServices.Length, "Each tunneled service should have a tunnel config");
-                var tunnelAppResource = CreateTunnelProxyResource(tunnels);
+                var tunnelAppResource = await _containerCreator.CreateTunnelProxyResourceAsync(tunnels, ct).ConfigureAwait(false);
                 var tunnelProxy = (ContainerNetworkTunnelProxy)tunnelAppResource.DcpResource;
                 await CreateAllDcpObjectsAsync<ContainerNetworkTunnelProxy>(ct).ConfigureAwait(false);
 
@@ -240,7 +248,18 @@ internal sealed partial class DcpExecutor : IDcpExecutor, IAsyncDisposable
             {
                 await Task.WhenAll([getProxyAddresses, createContainerNetworks]).WaitAsync(ct).ConfigureAwait(false);
 
-                await Task.WhenAll(containers.Select(c => Task.Run(() => CreateSingleContainerAsync(c, cctx, ct)))).WaitAsync(ct).ConfigureAwait(false);
+                await Task.WhenAll(containers.Select(c => Task.Run(async () =>
+                {
+                    AspireEventSource.Instance.DcpObjectCreationStart(((Container)c.DcpResource).Kind, c.DcpResourceName);
+                    try
+                    {
+                        await _containerCreator.CreateSingleContainerAsync(c, cctx, ct).ConfigureAwait(false);
+                    }
+                    finally
+                    {
+                        AspireEventSource.Instance.DcpObjectCreationStop(((Container)c.DcpResource).Kind, c.DcpResourceName);
+                    }
+                }))).WaitAsync(ct).ConfigureAwait(false);
             }, ct);
 
             // Now wait for all "leaf" creations to complete.
@@ -323,7 +342,6 @@ internal sealed partial class DcpExecutor : IDcpExecutor, IAsyncDisposable
     {
         var disposeCts = new CancellationTokenSource();
         disposeCts.CancelAfter(s_disposeTimeout);
-        _serverCertificateCacheSemaphore.Dispose();
         await StopAsync(disposeCts.Token).ConfigureAwait(false);
     }
 
@@ -334,7 +352,7 @@ internal sealed partial class DcpExecutor : IDcpExecutor, IAsyncDisposable
     /// </summary>
     /// <param name="applicationName">The application name to normalize.</param>
     /// <returns>The normalized application name with invalid characters removed.</returns>
-    private static string NormalizeApplicationName(string applicationName)
+    internal static string NormalizeApplicationName(string applicationName)
     {
         if (string.IsNullOrEmpty(applicationName))
         {
@@ -520,17 +538,11 @@ internal sealed partial class DcpExecutor : IDcpExecutor, IAsyncDisposable
         }
     }
 
-    // Specifies which endpoints to process when creating AllocatedEndpoint info
-    [Flags]
-    private enum AllocatedEndpointsMode
-    {
-        Workload = 0x1, // Process endpoints produced by workload resources (Executables and Containers)
-        ContainerTunnel = 0x2, // Process endpoints produced by container tunnels
-        All = 0xFF // Process endpoints produced by all resources, including container tunnels
-    }
-
     // Adds allocated endpoints for all relevant resources in the model
-    private void AddAllocatedEndpointInfo(IEnumerable<RenderedModelResource> resources, AllocatedEndpointsMode mode = AllocatedEndpointsMode.Workload)
+    void IDcpExecutor.AddAllocatedEndpointInfo(IEnumerable<RenderedModelResource> resources, AllocatedEndpointsMode mode)
+        => AddAllocatedEndpointInfo(resources, mode);
+
+    private void AddAllocatedEndpointInfo(IEnumerable<RenderedModelResource> resources, AllocatedEndpointsMode mode)
     {
         foreach (var appResource in resources)
         {
@@ -662,34 +674,6 @@ internal sealed partial class DcpExecutor : IDcpExecutor, IAsyncDisposable
 
     }
 
-    private void PrepareContainerNetworks()
-    {
-        var containerResources = _model.Resources.Where(mr => mr.IsContainer());
-        if (!containerResources.Any()) { return; }
-
-        var network = ContainerNetwork.Create(KnownNetworkIdentifiers.DefaultAspireContainerNetwork.Value);
-        if (containerResources.Any(cr => cr.GetContainerLifetimeType() == ContainerLifetime.Persistent))
-        {
-            // If we have any persistent container resources
-            network.Spec.Persistent = true;
-            // Persistent networks require a predictable name to be reused between runs.
-            // Append the same project hash suffix used for persistent container names.
-            network.Spec.NetworkName = $"{DefaultAspirePersistentNetworkName}-{_nameGenerator.GetProjectHashSuffix()}";
-        }
-        else
-        {
-            network.Spec.NetworkName = $"{DefaultAspireNetworkName}-{DcpNameGenerator.GetRandomNameSuffix()}";
-        }
-
-        if (!string.IsNullOrEmpty(_normalizedApplicationName))
-        {
-            var shortApplicationName = _normalizedApplicationName.Length < 32 ? _normalizedApplicationName : _normalizedApplicationName.Substring(0, 32);
-            network.Spec.NetworkName += $"-{shortApplicationName}"; // Limit to 32 characters to avoid exceeding resource name length limits.
-        }
-
-        _appResources.Add(new AppResource(network));
-    }
-
     /// <summary>
     /// Creates DCP Service objects that represent services exposed by resources in the model via endpoints (EndpointAnnotations).
     /// </summary>
@@ -770,280 +754,16 @@ internal sealed partial class DcpExecutor : IDcpExecutor, IAsyncDisposable
         }
 
         // Legacy (no tunnel) mode: we are going to just proxy all host endpoint into the container network.
-        var hostResources = _model.Resources.Select(AsHostResourceWithEndpoints).OfType<HostResourceWithEndpoints>().ToList();
+        var hostResources = _model.Resources.Select(HostResourceWithEndpoints.Create).OfType<HostResourceWithEndpoints>().ToList();
 
         foreach (var re in hostResources)
         {
-            var containerNetworkServices = CreateContainerNetworkServicesForHostResource(re);
+            var containerNetworkServices = _containerCreator.CreateContainerNetworkServicesForHostResource(re);
             _appResources.AddRange(containerNetworkServices.Select(cns => cns.ServiceResource));
         }
     }
 
-    private IEnumerable<ContainerNetworkService> CreateContainerNetworkServicesForHostResource(HostResourceWithEndpoints re)
-    {
-        var resourceLogger = _loggerService.GetLogger(re.Resource);
-        var services = new List<ContainerNetworkService>();
-        var useTunnel = _options.Value.EnableAspireContainerTunnel;
-        string tunnelProxyName = useTunnel ? GetTunnelProxyResourceName() : "";
-
-        foreach (var endpoint in re.Endpoints)
-        {
-            var (serviceName, isNew) = _nameGenerator.GetServiceName(re.Resource, endpoint, KnownNetworkIdentifiers.DefaultAspireContainerNetwork);
-            if (!isNew)
-            {
-                // Entirely possible that multiple container resources reference the same host resource and endpoint. 
-                // We let the first container creation task (exists == false) create the service and other tasks just leverages it.
-                continue;
-            }
-
-            if (useTunnel && endpoint.Protocol != ProtocolType.Tcp)
-            {
-                resourceLogger.LogWarning("Host endpoint '{EndpointName}' on resource '{HostResource}' is referenced by a container resource, but the endpoint is using a network protocol '{Protocol}' other than TCP. Only TCP is supported for container-to-host references.", endpoint.Name, re.Resource.Name, endpoint.Protocol);
-                continue;
-            }
-
-            var svc = Service.Create(serviceName);
-            svc.Spec.AddressAllocationMode = AddressAllocationModes.Proxyless;
-            svc.Spec.Protocol = PortProtocol.FromProtocolType(endpoint.Protocol);
-            // Address and port will be set automatically by DCP.
-
-            var serverSvc = _appResources.OfType<ServiceWithModelResource>().FirstOrDefault(swr =>
-                StringComparers.ResourceName.Equals(swr.ModelResource.Name, re.Resource.Name) &&
-                StringComparers.EndpointAnnotationName.Equals(swr.EndpointAnnotation.Name, endpoint.Name)
-            );
-            if (serverSvc is null)
-            {
-                // This should never happen--if a host resource has an Endpoint, we should have created a Service for it.
-                throw new InvalidDataException($"Host endpoint '{endpoint.Name}' on resource '{re.Resource.Name}' should have an associated DCP Service resource already set up");
-            }
-
-            TunnelConfiguration? tunnelConfig = null;
-            if (useTunnel)
-            {
-                tunnelConfig = new TunnelConfiguration
-                {
-                    Name = serviceName,
-                    ServerServiceName = serverSvc.DcpResource.Metadata.Name,
-                    ServerServiceNamespace = string.Empty,
-                    ClientServiceName = svc.Metadata.Name,
-                    ClientServiceNamespace = string.Empty
-                };
-            }
-
-            svc.Annotate(CustomResource.ResourceNameAnnotation, re.Resource.Name);  // Resource that implements the service behind the Endpoint.
-            svc.Annotate(CustomResource.EndpointNameAnnotation, endpoint.Name);
-            svc.Annotate(CustomResource.ContainerNetworkAnnotation, KnownNetworkIdentifiers.DefaultAspireContainerNetwork.Value);
-            svc.Annotate(CustomResource.PrimaryServiceNameAnnotation, serverSvc.DcpResource.Metadata.Name);
-
-            // We use this to distinguish services based on real tunnel proxies 
-            // vs "placeholders" relying on host.docker.internal bridge (when tunnel is disabled).
-            svc.Annotate(CustomResource.ContainerTunnelInstanceName, tunnelProxyName);
-
-            var svcAppResource = new ServiceAppResource(svc);
-            services.Add(new ContainerNetworkService { ServiceResource = svcAppResource, TunnelConfig = tunnelConfig });
-        }
-
-        return services;
-    }
-
-    private void PrepareExecutables()
-    {
-        PrepareProjectExecutables();
-        PreparePlainExecutables();
-        PrepareContainerExecutables();
-    }
-
-    private void PrepareContainerExecutables()
-    {
-        var modelContainerExecutableResources = _model.GetContainerExecutableResources();
-        foreach (var containerExecutable in modelContainerExecutableResources)
-        {
-            EnsureRequiredAnnotations(containerExecutable);
-            var exeInstance = GetDcpInstance(containerExecutable, instanceIndex: 0);
-
-            // Container exec runs against a dcp container resource, so its required to resolve a DCP name of the resource
-            // since this is ContainerExec resource, we will run against one of the container instances
-            var containerDcpName = containerExecutable.TargetContainerResource!.GetResolvedResourceName();
-
-            var containerExec = ContainerExec.Create(
-                name: exeInstance.Name,
-                containerName: containerDcpName,
-                command: containerExecutable.Command,
-                args: containerExecutable.Args?.ToList(),
-                workingDirectory: containerExecutable.WorkingDirectory);
-
-            containerExec.Annotate(CustomResource.OtelServiceNameAnnotation, containerExecutable.Name);
-            containerExec.Annotate(CustomResource.OtelServiceInstanceIdAnnotation, exeInstance.Suffix);
-            containerExec.Annotate(CustomResource.ResourceNameAnnotation, containerExecutable.Name);
-            SetInitialResourceState(containerExecutable, containerExec);
-
-            var exeAppResource = new RenderedModelResource(containerExecutable, containerExec);
-            _appResources.Add(exeAppResource);
-        }
-    }
-
-    private void PreparePlainExecutables()
-    {
-        var modelExecutableResources = _model.GetExecutableResources();
-        var executablesList = modelExecutableResources.ToList(); // Materialize to check count
-
-        foreach (var executable in executablesList)
-        {
-            EnsureRequiredAnnotations(executable);
-
-            var exeInstance = GetDcpInstance(executable, instanceIndex: 0);
-            var exePath = executable.Command;
-            var exe = Executable.Create(exeInstance.Name, exePath);
-
-            // The working directory is always relative to the app host project directory (if it exists).
-            exe.Spec.WorkingDirectory = executable.WorkingDirectory;
-            exe.Annotate(CustomResource.OtelServiceNameAnnotation, executable.Name);
-            exe.Annotate(CustomResource.OtelServiceInstanceIdAnnotation, exeInstance.Suffix);
-            exe.Annotate(CustomResource.ResourceNameAnnotation, executable.Name);
-
-            if (executable.SupportsDebugging(_configuration, out _))
-            {
-                // Just mark as IDE execution here - the actual launch configuration callback
-                // will be invoked in CreateExecutableAsync after endpoints are allocated.
-                exe.Spec.ExecutionType = ExecutionType.IDE;
-                exe.Spec.FallbackExecutionTypes = [ ExecutionType.Process ];
-            }
-            else
-            {
-                exe.Spec.ExecutionType = ExecutionType.Process;
-            }
-
-            SetInitialResourceState(executable, exe);
-
-            var exeAppResource = new RenderedModelResource(executable, exe);
-            AddServicesProducedInfo(executable, exe, exeAppResource);
-            _appResources.Add(exeAppResource);
-        }
-    }
-
-    private void PrepareProjectExecutables()
-    {
-        var modelProjectResources = _model.GetProjectResources();
-
-        foreach (var project in modelProjectResources)
-        {
-            if (!project.TryGetLastAnnotation<IProjectMetadata>(out var projectMetadata))
-            {
-                throw new InvalidOperationException("A project resource is missing required metadata"); // Should never happen.
-            }
-
-            EnsureRequiredAnnotations(project);
-
-            var replicas = project.GetReplicaCount();
-
-            for (var i = 0; i < replicas; i++)
-            {
-                var exeInstance = GetDcpInstance(project, instanceIndex: i);
-                var exe = Executable.Create(exeInstance.Name, "dotnet");
-                exe.Spec.WorkingDirectory = Path.GetDirectoryName(projectMetadata.ProjectPath);
-
-                exe.Annotate(CustomResource.OtelServiceNameAnnotation, project.Name);
-                exe.Annotate(CustomResource.OtelServiceInstanceIdAnnotation, exeInstance.Suffix);
-                exe.Annotate(CustomResource.ResourceNameAnnotation, project.Name);
-                exe.Annotate(CustomResource.ResourceReplicaCount, replicas.ToString(CultureInfo.InvariantCulture));
-                exe.Annotate(CustomResource.ResourceReplicaIndex, i.ToString(CultureInfo.InvariantCulture));
-
-                SetInitialResourceState(project, exe);
-
-                var projectArgs = new List<string>();
-
-                if (project.SupportsDebugging(_configuration, out var supportsDebuggingAnnotation))
-                {
-                    exe.Spec.ExecutionType = ExecutionType.IDE;
-                    exe.Spec.FallbackExecutionTypes = [ ExecutionType.Process ];
-
-                    if (supportsDebuggingAnnotation.LaunchConfigurationType is "project")
-                    {
-                        var projectLaunchConfiguration = new ProjectLaunchConfiguration();
-                        projectLaunchConfiguration.ProjectPath = projectMetadata.ProjectPath;
-                        projectLaunchConfiguration.Mode = _configuration[KnownConfigNames.DebugSessionRunMode]
-                            ?? (Debugger.IsAttached ? ExecutableLaunchMode.Debug : ExecutableLaunchMode.NoDebug);
-
-                        projectLaunchConfiguration.DisableLaunchProfile = project.TryGetLastAnnotation<ExcludeLaunchProfileAnnotation>(out _);
-                        // Use the effective launch profile which has fallback logic
-                        if (!projectLaunchConfiguration.DisableLaunchProfile && project.GetEffectiveLaunchProfile() is NamedLaunchProfile namedLaunchProfile)
-                        {
-                            projectLaunchConfiguration.LaunchProfile = namedLaunchProfile.Name;
-                        }
-
-                        // We want this annotation even if we are not using IDE execution; see ToSnapshot() for details.
-                        exe.AnnotateAsObjectList(Executable.LaunchConfigurationsAnnotation, projectLaunchConfiguration);
-                    }
-                    // Non-project launch types (e.g. azure-functions) have their launch configuration
-                    // applied later in CreateExecutableAsync() after endpoints are allocated.
-                }
-                else
-                {
-                    exe.Spec.ExecutionType = ExecutionType.Process;
-
-                    var projectLaunchConfiguration = new ProjectLaunchConfiguration();
-                    projectLaunchConfiguration.ProjectPath = projectMetadata.ProjectPath;
-
-                    // `dotnet watch` does not work with file-based apps yet, so we have to use `dotnet run` in that case
-                    if (_configuration.GetBool("DOTNET_WATCH") is not true || projectMetadata.IsFileBasedApp)
-                    {
-                        projectArgs.Add("run");
-                        projectArgs.Add(projectMetadata.IsFileBasedApp ? "--file" : "--project");
-                        projectArgs.Add(projectMetadata.ProjectPath);
-                        if (projectMetadata.IsFileBasedApp)
-                        {
-                            projectArgs.Add("--no-cache");
-                        }
-                        if (projectMetadata.SuppressBuild)
-                        {
-                            projectArgs.Add("--no-build");
-                        }
-                    }
-                    else
-                    {
-                        projectArgs.AddRange([
-                            "watch",
-                            "--non-interactive",
-                            "--no-hot-reload",
-                            "--project",
-                            projectMetadata.ProjectPath
-                        ]);
-                    }
-
-                    if (!string.IsNullOrEmpty(_distributedApplicationOptions.Configuration))
-                    {
-                        projectArgs.AddRange(new[] { "--configuration", _distributedApplicationOptions.Configuration });
-                    }
-
-                    // We pretty much always want to suppress the normal launch profile handling
-                    // because the settings from the profile will override the ambient environment settings, which is not what we want
-                    // (the ambient environment settings for service processes come from the application model
-                    // and should be HIGHER priority than the launch profile settings).
-                    // This means we need to apply the launch profile settings manually inside CreateExecutableAsync().
-                    projectArgs.Add("--no-launch-profile");
-
-                    // We want this annotation even if we are not using IDE execution; see ToSnapshot() for details.
-                    exe.AnnotateAsObjectList(Executable.LaunchConfigurationsAnnotation, projectLaunchConfiguration);
-                }
-
-                exe.SetAnnotationAsObjectList(CustomResource.ResourceProjectArgsAnnotation, projectArgs);
-
-                var exeAppResource = new RenderedModelResource(project, exe);
-                AddServicesProducedInfo(project, exe, exeAppResource);
-                _appResources.Add(exeAppResource);
-            }
-        }
-    }
-
-    private void EnsureRequiredAnnotations(IResource resource)
-    {
-        // Add the default lifecycle commands (start/stop/restart)
-        resource.AddLifeCycleCommands();
-
-        _nameGenerator.EnsureDcpInstancesPopulated(resource);
-    }
-
-    private static void SetInitialResourceState(IResource resource, IAnnotationHolder annotationHolder)
+    internal static void SetInitialResourceState(IResource resource, IAnnotationHolder annotationHolder)
     {
         // Store the initial state of the resource
         if (resource.TryGetLastAnnotation<ResourceSnapshotAnnotation>(out var initial) &&
@@ -1053,11 +773,12 @@ internal sealed partial class DcpExecutor : IDcpExecutor, IAsyncDisposable
         }
     }
 
-    private Task CreateContainerExecutablesAsync(IEnumerable<RenderedModelResource> containerExecAppResources, CancellationToken cancellationToken)
-        => CreateRenderedResourcesAsync(CreateContainerExecutableAsync, containerExecAppResources, Model.Dcp.ContainerExecKind, cancellationToken);
-
-    private Task CreateExecutablesAsync(IEnumerable<RenderedModelResource> execAppResources, CancellationToken cancellationToken)
-        => CreateRenderedResourcesAsync(CreateExecutableAsync, execAppResources, Model.Dcp.ExecutableKind, cancellationToken);
+    async Task IDcpExecutor.CreateRenderedResourcesAsync(
+       Func<RenderedModelResource, ILogger, CancellationToken, Task> createResourceFunc,
+       IEnumerable<RenderedModelResource> executables,
+       string executableKind,
+       CancellationToken cancellationToken)
+        => await CreateRenderedResourcesAsync(createResourceFunc, executables, executableKind, cancellationToken).ConfigureAwait(false);
 
     private async Task CreateRenderedResourcesAsync(
        Func<RenderedModelResource, ILogger, CancellationToken, Task> createResourceFunc,
@@ -1146,7 +867,15 @@ internal sealed partial class DcpExecutor : IDcpExecutor, IAsyncDisposable
             {
                 try
                 {
-                    await createResourceFunc(er, resourceLogger, cancellationToken).ConfigureAwait(false);
+                    AspireEventSource.Instance.DcpObjectCreationStart(er.DcpResource.Kind, er.DcpResourceName);
+                    try
+                    {
+                        await createResourceFunc(er, resourceLogger, cancellationToken).ConfigureAwait(false);
+                    }
+                    finally
+                    {
+                        AspireEventSource.Instance.DcpObjectCreationStop(er.DcpResource.Kind, er.DcpResourceName);
+                    }
                 }
                 catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
                 {
@@ -1185,340 +914,10 @@ internal sealed partial class DcpExecutor : IDcpExecutor, IAsyncDisposable
         }
     }
 
-    private async Task CreateContainerExecutableAsync(RenderedModelResource er, ILogger resourceLogger, CancellationToken cancellationToken)
-    {
-        if (er.DcpResource is not ContainerExec containerExe)
-        {
-            throw new InvalidOperationException($"Expected an {nameof(ContainerExec)} resource, but got {er.DcpResource.Kind} instead");
-        }
-        var spec = containerExe.Spec;
-
-        try
-        {
-            AspireEventSource.Instance.DcpObjectCreationStart(er.DcpResource.Kind, er.DcpResourceName);
-            await _kubernetesService.CreateAsync(containerExe, cancellationToken).ConfigureAwait(false);
-        }
-        finally
-        {
-            AspireEventSource.Instance.DcpObjectCreationStop(er.DcpResource.Kind, er.DcpResourceName);
-        }
-    }
-
-    private async Task CreateExecutableAsync(RenderedModelResource er, ILogger resourceLogger, CancellationToken cancellationToken)
-    {
-        if (er.DcpResource is not Executable exe)
-        {
-            throw new InvalidOperationException($"Expected an Executable resource, but got {er.DcpResource.Kind} instead");
-        }
-        try
-        {
-            AspireEventSource.Instance.DcpObjectCreationStart(er.DcpResource.Kind, er.DcpResourceName);
-            cancellationToken.ThrowIfCancellationRequested();
-
-            var spec = exe.Spec;
-
-            // Don't create an args collection unless needed. A null args collection means a project run by the will use args provided by the launch profile.
-            // https://github.com/microsoft/aspire/blob/main/docs/specs/IDE-execution.md#launch-profile-processing-project-launch-configuration
-            spec.Args = null;
-
-            // An executable can be restarted so args must be reset to an empty state.
-            // After resetting, first apply any dotnet project related args, e.g. configuration, and then add args from the model resource.
-            if (er.DcpResource.TryGetAnnotationAsObjectList<string>(CustomResource.ResourceProjectArgsAnnotation, out var projectArgs) && projectArgs.Count > 0)
-            {
-                spec.Args ??= [];
-                spec.Args.AddRange(projectArgs);
-            }
-
-            var (configuration, pemCertificates) = await BuildExecutableConfiguration(er, resourceLogger, cancellationToken).ConfigureAwait(false);
-
-            spec.PemCertificates = pemCertificates;
-
-            var launchArgs = BuildLaunchArgs(er, spec, configuration.Arguments);
-            var executableArgs = launchArgs.Where(a => a.Executable).Select(a => a.Value).ToList();
-            var displayArgs = launchArgs.Where(a => a.Display).ToList();
-            if (executableArgs.Count > 0)
-            {
-                spec.Args ??= [];
-                spec.Args.AddRange(executableArgs);
-            }
-            // Arg annotations are what is displayed in the dashboard.
-            er.DcpResource.SetAnnotationAsObjectList(CustomResource.ResourceAppArgsAnnotation, displayArgs.Select(a => new AppLaunchArgumentAnnotation(a.Value, isSensitive: a.IsSensitive)));
-
-            spec.Env = configuration.EnvironmentVariables.Select(kvp => new EnvVar { Name = kvp.Key, Value = kvp.Value }).ToList();
-
-            if (configuration.Exception is not null)
-            {
-                throw new FailedToApplyEnvironmentException();
-            }
-
-            // Invoke the debug configuration callback now that endpoints are allocated.
-            // This allows launch configurations to access endpoint URLs that were not
-            // available during PrepareExecutables().
-            // "project" launch types configure their launch configs in PrepareProjectExecutables() directly;
-            // all other types (plain executables and project subtypes like azure-functions) are handled here.
-            if (er.ModelResource.SupportsDebugging(_configuration, out var supportsDebuggingAnnotation)
-                && supportsDebuggingAnnotation.LaunchConfigurationType is not "project")
-            {
-                var mode = _configuration[KnownConfigNames.DebugSessionRunMode] ?? ExecutableLaunchMode.NoDebug;
-                try
-                {
-                    // Clear any existing launch configurations (needed for restart scenarios).
-                    exe.Annotate(Executable.LaunchConfigurationsAnnotation, string.Empty);
-                    supportsDebuggingAnnotation.LaunchConfigurationAnnotator(exe, mode);
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogWarning(ex, "Failed to apply launch configuration for resource '{ResourceName}'. Falling back to process execution.", er.ModelResource.Name);
-                    exe.Spec.ExecutionType = ExecutionType.Process;
-                }
-            }
-
-            await _kubernetesService.CreateAsync(exe, cancellationToken).ConfigureAwait(false);
-        }
-        finally
-        {
-            AspireEventSource.Instance.DcpObjectCreationStop(er.DcpResource.Kind, er.DcpResourceName);
-        }
-    }
-
-    private async Task<(IExecutionConfigurationResult Configuration, ExecutablePemCertificates? PemCertificates)>
-    BuildExecutableConfiguration(RenderedModelResource er, ILogger resourceLogger, CancellationToken cancellationToken)
-    {
-        var exe = (Executable)er.DcpResource;
-
-        // Build the base paths for certificate output in the DCP session directory.
-        var certificatesRootDir = Path.Join(_locations.DcpSessionDir, exe.Name());
-        var bundleOutputPath = Path.Join(certificatesRootDir, "cert.pem");
-        var customBundleOutputPath = Path.Join(certificatesRootDir, "bundles");
-        var certificatesOutputPath = Path.Join(certificatesRootDir, "certs");
-        var baseServerAuthOutputPath = Path.Join(certificatesRootDir, "private");
-
-        var configuration = await ExecutionConfigurationBuilder.Create(er.ModelResource)
-            .WithArgumentsConfig()
-            .WithEnvironmentVariablesConfig()
-            .WithCertificateTrustConfig(scope =>
-            {
-                var dirs = new List<string> { certificatesOutputPath };
-                if (scope == CertificateTrustScope.Append)
-                {
-                    var existing = Environment.GetEnvironmentVariable("SSL_CERT_DIR");
-                    if (!string.IsNullOrEmpty(existing))
-                    {
-                        dirs.AddRange(existing.Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries));
-                    }
-                }
-
-                return new()
-                {
-                    CertificateBundlePath = ReferenceExpression.Create($"{bundleOutputPath}"),
-                    // Build the SSL_CERT_DIR value by combining the new certs directory with any existing directories.
-                    CertificateDirectoriesPath = ReferenceExpression.Create($"{string.Join(Path.PathSeparator, dirs)}"),
-                    RootCertificatesPath = certificatesRootDir,
-                };
-            })
-            .WithHttpsCertificateConfig(cert => new()
-            {
-                CertificatePath = ReferenceExpression.Create($"{Path.Join(baseServerAuthOutputPath, $"{cert.Thumbprint}.crt")}"),
-                KeyPath = ReferenceExpression.Create($"{Path.Join(baseServerAuthOutputPath, $"{cert.Thumbprint}.key")}"),
-                PfxPath = ReferenceExpression.Create($"{Path.Join(baseServerAuthOutputPath, $"{cert.Thumbprint}.pfx")}"),
-            })
-            .BuildAsync(_executionContext, resourceLogger, cancellationToken)
-            .ConfigureAwait(false);
-
-        // Add the certificates to the executable spec so they'll be placed in the DCP config
-        ExecutablePemCertificates? pemCertificates = null;
-        if (configuration.TryGetAdditionalData<CertificateTrustExecutionConfigurationData>(out var certificateTrustConfiguration)
-            && certificateTrustConfiguration.Scope != CertificateTrustScope.None
-            && certificateTrustConfiguration.Certificates.Count > 0)
-        {
-            pemCertificates = new ExecutablePemCertificates
-            {
-                Certificates = BuildPemCertificateList(certificateTrustConfiguration.Certificates),
-                ContinueOnError = true,
-            };
-
-            if (certificateTrustConfiguration.CustomBundlesFactories.Count > 0)
-            {
-                Directory.CreateDirectory(customBundleOutputPath);
-            }
-
-            foreach (var bundleFactory in certificateTrustConfiguration.CustomBundlesFactories)
-            {
-                var bundleId = bundleFactory.Key;
-                var bundleBytes = await bundleFactory.Value(certificateTrustConfiguration.Certificates, cancellationToken).ConfigureAwait(false);
-
-                File.WriteAllBytes(Path.Join(customBundleOutputPath, bundleId), bundleBytes);
-            }
-        }
-
-        if (configuration.TryGetAdditionalData<HttpsCertificateExecutionConfigurationData>(out var tlsCertificateConfiguration))
-        {
-            var thumbprint = tlsCertificateConfiguration.Certificate.Thumbprint;
-            var publicCetificatePem = tlsCertificateConfiguration.Certificate.ExportCertificatePem();
-            (var keyPem, var pfxBytes) = await GetCertificateKeyMaterialAsync(tlsCertificateConfiguration, cancellationToken).ConfigureAwait(false);
-
-            if (OperatingSystem.IsWindows())
-            {
-                Directory.CreateDirectory(baseServerAuthOutputPath);
-            }
-            else
-            {
-                Directory.CreateDirectory(baseServerAuthOutputPath, UnixFileMode.UserExecute | UnixFileMode.UserWrite | UnixFileMode.UserRead);
-            }
-
-            File.WriteAllText(Path.Join(baseServerAuthOutputPath, $"{thumbprint}.crt"), publicCetificatePem);
-
-            if (keyPem is not null)
-            {
-                var keyBytes = Encoding.ASCII.GetBytes(keyPem);
-
-                // Write each of the certificate, key, and PFX assets to the temp folder
-                File.WriteAllBytes(Path.Join(baseServerAuthOutputPath, $"{thumbprint}.key"), keyBytes);
-
-                Array.Clear(keyPem, 0, keyPem.Length);
-                Array.Clear(keyBytes, 0, keyBytes.Length);
-            }
-
-            if (pfxBytes is not null)
-            {
-                File.WriteAllBytes(Path.Join(baseServerAuthOutputPath, $"{thumbprint}.pfx"), pfxBytes);
-                Array.Clear(pfxBytes, 0, pfxBytes.Length);
-            }
-        }
-
-        return (configuration, pemCertificates);
-    }
-
-    private static List<(string Value, bool IsSensitive, bool Executable, bool Display)> BuildLaunchArgs(RenderedModelResource er, ExecutableSpec spec, IEnumerable<(string Value, bool IsSensitive)> appHostArgs)
-    {
-        // Launch args is the final list of args that are displayed in the UI and possibly added to the executable spec.
-        // They're built from app host resource model args and any args in the effective launch profile.
-        // Follows behavior in the IDE execution spec when in IDE execution mode:
-        // https://github.com/microsoft/aspire/blob/main/docs/specs/IDE-execution.md#project-launch-configuration-type-project
-        var launchArgs = new List<(string Value, bool IsSensitive, bool Executable, bool Display)>();
-
-        // If the executable is a project then include any command line args from the launch profile.
-        if (er.ModelResource is ProjectResource project)
-        {
-            // Args in the launch profile is used when:
-            // 1. The project is run as an executable. Launch profile args are combined with app host supplied args.
-            // 2. The project is run by the IDE and no app host args are specified.
-            if (spec.ExecutionType == ExecutionType.Process || (spec.ExecutionType == ExecutionType.IDE && !appHostArgs.Any()))
-            {
-                // When the .NET project is launched from an IDE the launch profile args are automatically added.
-                // We still want to display the args in the dashboard so only add them to the custom arg annotations.
-                var executableArg = spec.ExecutionType != ExecutionType.IDE;
-
-                var launchProfileArgs = GetLaunchProfileArgs(project.GetEffectiveLaunchProfile()?.LaunchProfile);
-                if (launchProfileArgs.Count > 0 && appHostArgs.Any())
-                {
-                    // If there are app host args, add a double-dash to separate them from the launch args.
-                    launchProfileArgs.Insert(0, "--");
-                }
-
-                launchArgs.AddRange(launchProfileArgs.Select(a => (a, isSensitive: false, executableArg, true)));
-            }
-        }
-#pragma warning disable ASPIREDOTNETTOOL // Type is for evaluation purposes only and is subject to change or removal in future updates. Suppress this diagnostic to proceed.
-        else if (er.ModelResource is DotnetToolResource tool)
-        {
-            var argSeparator = appHostArgs.Select((a, i) => (index: i, value: a.Value))
-                .FirstOrDefault(x => x.value == DotnetToolResourceExtensions.ArgumentSeparator);
-
-            var args = appHostArgs.Select((a, i) => (arg: a, display: i > argSeparator.index));
-            launchArgs.AddRange(args.Select(x => (x.arg.Value, x.arg.IsSensitive, true, x.display)));
-            return launchArgs;
-
-        }
-#pragma warning restore ASPIREDOTNETTOOL // Type is for evaluation purposes only and is subject to change or removal in future updates. Suppress this diagnostic to proceed.
-
-        // In the situation where args are combined (process execution) the app host args are added after the launch profile args.
-        launchArgs.AddRange(appHostArgs.Select(a => (a.Value, a.IsSensitive, true, true)));
-
-        return launchArgs;
-    }
-
-    private static List<string> GetLaunchProfileArgs(LaunchProfile? launchProfile)
-    {
-        if (launchProfile is not null && !string.IsNullOrWhiteSpace(launchProfile.CommandLineArgs))
-        {
-            return CommandLineArgsParser.Parse(launchProfile.CommandLineArgs);
-        }
-
-        return [];
-    }
-
-    private void PrepareContainers()
-    {
-        var modelContainerResources = _model.GetContainerResources();
-
-        foreach (var container in modelContainerResources)
-        {
-            if (!container.TryGetContainerImageName(out var containerImageName))
-            {
-                // This should never happen! In order to get into this loop we need
-                // to have the annotation, if we don't have the annotation by the time
-                // we get here someone is doing something wrong.
-                throw new InvalidOperationException();
-            }
-
-            EnsureRequiredAnnotations(container);
-
-            var containerObjectInstance = GetDcpInstance(container, instanceIndex: 0);
-            var ctr = Container.Create(containerObjectInstance.Name, containerImageName);
-
-            ctr.Spec.ContainerName = containerObjectInstance.Name; // Use the same name for container orchestrator (Docker, Podman) resource and DCP object name.
-
-            if (container.GetContainerLifetimeType() == ContainerLifetime.Persistent)
-            {
-                ctr.Spec.Persistent = true;
-            }
-
-            if (container.TryGetContainerImagePullPolicy(out var pullPolicy))
-            {
-                ctr.Spec.PullPolicy = pullPolicy switch
-                {
-                    ImagePullPolicy.Default => null,
-                    ImagePullPolicy.Always => ContainerPullPolicy.Always,
-                    ImagePullPolicy.Missing => ContainerPullPolicy.Missing,
-                    ImagePullPolicy.Never => ContainerPullPolicy.Never,
-                    _ => throw new InvalidOperationException($"Unknown pull policy '{Enum.GetName(typeof(ImagePullPolicy), pullPolicy)}' for container '{container.Name}'")
-                };
-            }
-
-            ctr.Annotate(CustomResource.ResourceNameAnnotation, container.Name);
-            ctr.Annotate(CustomResource.OtelServiceNameAnnotation, container.Name);
-            ctr.Annotate(CustomResource.OtelServiceInstanceIdAnnotation, containerObjectInstance.Suffix);
-            SetInitialResourceState(container, ctr);
-
-            var aanns = container.Annotations.OfType<ContainerNetworkAliasAnnotation>().ToImmutableArray();
-            if (aanns.Any(a => a.Network != KnownNetworkIdentifiers.DefaultAspireContainerNetwork))
-            {
-                throw new InvalidOperationException("Custom container networks are not supported yet.");
-            }
-
-            ctr.Spec.Networks = new List<ContainerNetworkConnection>
-            {
-                new ContainerNetworkConnection
-                {
-                    Name = KnownNetworkIdentifiers.DefaultAspireContainerNetwork.Value,
-                    Aliases = aanns.Select(a => a.Alias)
-                                .Prepend($"{container.Name}.dev.internal") // Alias to .dev.internal to support dev cert trust
-                                .Prepend(container.Name)
-                                .ToList()
-                }
-            };
-
-            var containerAppResource = new RenderedModelResource(container, ctr);
-            AddServicesProducedInfo(container, ctr, containerAppResource);
-            _appResources.Add(containerAppResource);
-        }
-    }
-
     /// <summary>
     /// Gets information about the resource's DCP instance. ReplicaInstancesAnnotation is added in BeforeStartEvent.
     /// </summary>
-    private static DcpInstance GetDcpInstance(IResource resource, int instanceIndex)
+    internal static DcpInstance GetDcpInstance(IResource resource, int instanceIndex)
     {
         if (!resource.TryGetInstances(out var instances))
         {
@@ -1536,429 +935,7 @@ internal sealed partial class DcpExecutor : IDcpExecutor, IAsyncDisposable
         throw new DistributedApplicationException($"Couldn't find required instance ID for index {instanceIndex} on resource {resource.Name}.");
     }
 
-    private async Task CreateSingleContainerAsync(RenderedModelResource cr, ContainerCreationContext cctx, CancellationToken cToken)
-    {
-        var dcpContainer = (Container)cr.DcpResource;
-        AspireEventSource.Instance.DcpObjectCreationStart(dcpContainer.Kind, dcpContainer.Metadata.Name);
-        var signalServicesSpecReadyOnce = ConcurrencyUtils.Once(() => cctx.ContainerServicesSpecReady.Signal());
-
-        try
-        {
-            cToken.ThrowIfCancellationRequested();
-            var logger = _loggerService.GetLogger(cr.ModelResource);
-            AddAllocatedEndpointInfo([cr], AllocatedEndpointsMode.Workload);
-
-            try
-            {
-                // In previous versions of Aspire we would delay raising BeforeResourceStarted event for explicit startup resources.
-                // But we need to determine whether the container is using any host resources, 
-                // and need to call environment and argument annotation callbacks in the process, and this means 
-                // we need to raise this event now, so that "last chance dynamic setup or validation" can be performed for the resource
-                // (see docs/specs/appmodel.md#well-known-lifecycle-events)
-                await _executorEvents.PublishAsync(new OnResourceStartingContext(cToken, KnownResourceTypes.Container, cr.ModelResource, dcpContainer.Metadata.Name)).ConfigureAwait(false);
-
-                // Publish snapshot built from DCP resource. Do this now to populate more values from DCP (source) to ensure they're
-                // available if the resource isn't immediately started because it's waiting or is configured for explicit start.
-                await _executorEvents.PublishAsync(new OnResourceChangedContext(_shutdownCancellation.Token, KnownResourceTypes.Container, cr.ModelResource, cr.DcpResourceName, new ResourceStatus(null, null, null), s => _resourceWatcher.SnapshotBuilder.ToSnapshot((Container)cr.DcpResource, s))).ConfigureAwait(false);
-
-                // Note: resource restart is done by calling StartResourceAsync(), which sets Spec.Start to true and 
-                // calls CreateDcpContainerAsync() directly, bypassing the following check.
-                var explicitStartup = cr.ModelResource.TryGetLastAnnotation<ExplicitStartupAnnotation>(out _);
-                if (explicitStartup)
-                {
-                    dcpContainer.Spec.Start = false;
-                }
-
-                var hostDependencies = (await GetHostDependenciesAsync(cr.ModelResource, cToken).ConfigureAwait(false)).ToImmutableArray();
-
-                if (hostDependencies.Any())
-                {
-                    await CreateTunnelDependentContainerAsync(cr, hostDependencies, cctx, signalServicesSpecReadyOnce, cToken).ConfigureAwait(false);
-                }
-                else
-                {
-                    // There will be no tunnel services for this container; we have complete information about services this container will need. 
-                    signalServicesSpecReadyOnce();
-                    
-                    await CreateDcpContainerAsync(cr, logger, cToken).ConfigureAwait(false);
-                }
-            }
-            catch (OperationCanceledException) when (cToken.IsCancellationRequested)
-            {
-                // Expected cancellation during shutdown - propagate clean cancellation
-                throw;
-            }
-            catch (FailedToApplyEnvironmentException)
-            {
-                // For this exception we don't want the noise of the stack trace, we've already
-                // provided more detail where we detected the issue (e.g. envvar name). To get
-                // more diagnostic information reduce logging level for DCP log category to Debug.
-                await _executorEvents.PublishAsync(new OnResourceFailedToStartContext(cToken, KnownResourceTypes.Container, cr.ModelResource, cr.DcpResourceName)).ConfigureAwait(false);
-            }
-            catch (Exception ex)
-            {
-                logger.LogError(ex, "Failed to create container resource {ResourceName}", cr.ModelResource.Name);
-                await _executorEvents.PublishAsync(new OnResourceFailedToStartContext(cToken, KnownResourceTypes.Container, cr.ModelResource, cr.DcpResourceName)).ConfigureAwait(false);
-            }
-        }
-        finally
-        {
-            signalServicesSpecReadyOnce();
-            AspireEventSource.Instance.DcpObjectCreationStop(dcpContainer.Kind, dcpContainer.Metadata.Name);
-        }
-    }
-
-    private async Task CreateDcpContainerAsync(RenderedModelResource cr, ILogger logger, CancellationToken cToken)
-    {
-        cToken.ThrowIfCancellationRequested();
-
-        await PublishEndpointAllocatedEventAsync([cr], cToken).ConfigureAwait(false);
-        await _executorEvents.PublishAsync(new OnConnectionStringAvailableContext(cToken, cr.ModelResource)).ConfigureAwait(false);
-        // BeforeResourceStarted already published by the caller.
-
-        var dcpContainer = (Container)cr.DcpResource;
-        var modelContainer = cr.ModelResource;
-
-        await ApplyBuildArgumentsAsync(dcpContainer, cr.ModelResource, _executionContext.ServiceProvider, cToken).ConfigureAwait(false);
-
-        var spec = dcpContainer.Spec;
-
-        if (cr.ServicesProduced.Count > 0)
-        {
-            spec.Ports = BuildContainerPorts(cr);
-        }
-
-        spec.VolumeMounts = BuildContainerMounts(cr.ModelResource);
-
-        var (runArgs, failedToApplyRunArgs) = await BuildRunArgsAsync(logger, cr.ModelResource, cToken).ConfigureAwait(false);
-        if (failedToApplyRunArgs)
-        {
-            throw new FailedToApplyEnvironmentException();
-        }
-        spec.RunArgs = runArgs;
-
-        var (configuration, pemCertificates, createFiles) = await BuildContainerConfiguration(cr, logger, cToken).ConfigureAwait(false);
-        if (configuration.Exception is not null)
-        {
-            throw new FailedToApplyEnvironmentException($"Failed to apply configuration to container {cr.ModelResource.Name}", configuration.Exception);
-        }
-
-        var args = configuration.Arguments.Select(a => a.Value);
-        // modelContainer is not necessarily ContainerResource (can be custom resource that produces a container).
-        if (modelContainer is ContainerResource { ShellExecution: true })
-        {
-            spec.Args = ["-c", $"{string.Join(' ', args)}"];
-        }
-        else
-        {
-            spec.Args = args.ToList();
-        }
-        dcpContainer.SetAnnotationAsObjectList(CustomResource.ResourceAppArgsAnnotation, configuration.Arguments.Select(a => new AppLaunchArgumentAnnotation(a.Value, isSensitive: a.IsSensitive)));
-
-        spec.Env = configuration.EnvironmentVariables.Select(kvp => new EnvVar { Name = kvp.Key, Value = kvp.Value }).ToList();
-        spec.CreateFiles = createFiles;
-        if (modelContainer is ContainerResource containerResource)
-        {
-            spec.Command = containerResource.Entrypoint;
-        }
-        spec.PemCertificates = pemCertificates;
-
-        if (_dcpInfo is not null)
-        {
-            DcpDependencyCheck.CheckDcpInfoAndLogErrors(logger, _options.Value, _dcpInfo);
-        }
-
-        await _kubernetesService.CreateAsync(dcpContainer, cToken).ConfigureAwait(false);
-
-        var containerExes = _appResources.OfType<RenderedModelResource>().Where(ar => ar.DcpResource is ContainerExec ce && ce.Spec.ContainerName == dcpContainer.Metadata.Name).ToArray();
-        if (containerExes.Length > 0)
-        {
-            await CreateContainerExecutablesAsync(containerExes, cToken).ConfigureAwait(false);
-        }
-    }
-
-    private async Task CreateTunnelDependentContainerAsync(RenderedModelResource cr, ImmutableArray<HostResourceWithEndpoints> hostDependencies, ContainerCreationContext cctx, Action signalServicesSpecReadyOnce, CancellationToken cToken)
-    {
-        cToken.ThrowIfCancellationRequested();
-
-        // Ensure that we have services and tunnel definitions for all host dependencies of this container.
-
-        List<ContainerNetworkService> newServices = [];
-        foreach (var dep in hostDependencies)
-        {
-            var cnetServices = CreateContainerNetworkServicesForHostResource(dep);
-            newServices.AddRange(cnetServices);
-        }
-        if (newServices.Count > 0)
-        {
-            foreach (var s in newServices)
-            {
-                await cctx.ContainerServicesChan.Writer.WriteAsync(s, cToken).ConfigureAwait(false);
-            }
-        }
-
-        signalServicesSpecReadyOnce();
-        await cctx.CreateTunnel.ConfigureAwait(false);
-
-        await CreateDcpContainerAsync(cr, _loggerService.GetLogger(cr.ModelResource), cToken).ConfigureAwait(false);
-    }
-
-    private async Task<(IExecutionConfigurationResult, ContainerPemCertificates?, List<ContainerCreateFileSystem>?)>
-    BuildContainerConfiguration(RenderedModelResource cr, ILogger resourceLogger, CancellationToken cancellationToken)
-    {
-        var certificatesDestination = ContainerCertificatePathsAnnotation.DefaultCustomCertificatesDestination;
-        var bundlePaths = ContainerCertificatePathsAnnotation.DefaultCertificateBundlePaths.ToList();
-        var certificateDirsPaths = ContainerCertificatePathsAnnotation.DefaultCertificateDirectoriesPaths.ToList();
-
-        if (cr.ModelResource.TryGetLastAnnotation<ContainerCertificatePathsAnnotation>(out var pathsAnnotation))
-        {
-            certificatesDestination = pathsAnnotation.CustomCertificatesDestination ?? certificatesDestination;
-            bundlePaths = pathsAnnotation.DefaultCertificateBundles ?? bundlePaths;
-            certificateDirsPaths = pathsAnnotation.DefaultCertificateDirectories ?? certificateDirsPaths;
-        }
-
-        var serverAuthCertificatesBasePath = $"{certificatesDestination}/private";
-
-        var configuration = await ExecutionConfigurationBuilder.Create(cr.ModelResource)
-            .WithArgumentsConfig()
-            .WithEnvironmentVariablesConfig()
-            .WithCertificateTrustConfig(scope =>
-            {
-                var dirs = new List<string> { certificatesDestination + "/certs" };
-                if (scope == CertificateTrustScope.Append)
-                {
-                    // When appending to the default trust store, include the default certificate directories
-                    dirs.AddRange(certificateDirsPaths!);
-                }
-
-                return new()
-                {
-                    CertificateBundlePath = ReferenceExpression.Create($"{certificatesDestination}/cert.pem"),
-                    // Build Linux PATH style colon-separated list of directories
-                    CertificateDirectoriesPath = ReferenceExpression.Create($"{string.Join(':', dirs)}"),
-                    RootCertificatesPath = certificatesDestination,
-                    IsContainer = true,
-                };
-            })
-            .WithHttpsCertificateConfig(cert => new()
-            {
-                CertificatePath = ReferenceExpression.Create($"{serverAuthCertificatesBasePath}/{cert.Thumbprint}.crt"),
-                KeyPath = ReferenceExpression.Create($"{serverAuthCertificatesBasePath}/{cert.Thumbprint}.key"),
-                PfxPath = ReferenceExpression.Create($"{serverAuthCertificatesBasePath}/{cert.Thumbprint}.pfx"),
-            })
-            .AddExecutionConfigurationGatherer(new OtlpEndpointReferenceGatherer())
-            .BuildAsync(_executionContext, resourceLogger, cancellationToken)
-            .ConfigureAwait(false);
-
-        List<ContainerFileSystemEntry> customBundleFiles = new();
-
-        // Add the certificates to the Container spec so they'll be placed in the DCP config
-        ContainerPemCertificates? pemCertificates = null;
-        if (configuration.TryGetAdditionalData<CertificateTrustExecutionConfigurationData>(out var certificateTrustConfiguration)
-            && certificateTrustConfiguration.Scope != CertificateTrustScope.None
-            && certificateTrustConfiguration.Certificates.Count > 0)
-        {
-            pemCertificates = new ContainerPemCertificates
-            {
-                Certificates = BuildPemCertificateList(certificateTrustConfiguration.Certificates),
-                Destination = certificatesDestination,
-                ContinueOnError = true,
-            };
-
-            if (certificateTrustConfiguration.Scope != CertificateTrustScope.Append)
-            {
-                // If overriding the default resource CA bundle, then we want to copy our bundle to the well-known locations
-                // used by common Linux distributions to make it easier to ensure applications pick it up.
-                // Group by common directory to avoid creating multiple file system entries for the same root directory.
-                pemCertificates.OverwriteBundlePaths = bundlePaths;
-            }
-
-            foreach (var bundleFactory in certificateTrustConfiguration.CustomBundlesFactories)
-            {
-                var bundleId = bundleFactory.Key;
-                var bundleBytes = await bundleFactory.Value(certificateTrustConfiguration.Certificates, cancellationToken).ConfigureAwait(false);
-
-                customBundleFiles.Add(new ContainerFileSystemEntry
-                {
-                    Name = bundleId,
-                    Type = ContainerFileSystemEntryType.File,
-                    RawContents = Convert.ToBase64String(bundleBytes),
-                });
-            }
-        }
-
-        var buildCreateFilesContext = new BuildCreateFilesContext
-        {
-            Resource = cr.ModelResource,
-            CertificateTrustScope = certificateTrustConfiguration?.Scope ?? CertificateTrustScope.None,
-            CertificateTrustBundlePath = $"{certificatesDestination}/cert.pem",
-        };
-
-        if (configuration.TryGetAdditionalData<HttpsCertificateExecutionConfigurationData>(out var tlsCertificateConfiguration))
-        {
-            var thumbprint = tlsCertificateConfiguration.Certificate.Thumbprint;
-            buildCreateFilesContext.HttpsCertificateContext = new ContainerFileSystemCallbackHttpsCertificateContext
-            {
-                CertificatePath = ReferenceExpression.Create($"{serverAuthCertificatesBasePath}/{thumbprint}.crt"),
-                KeyPath = tlsCertificateConfiguration.KeyPathReference,
-                PfxPath = tlsCertificateConfiguration.PfxPathReference,
-                Password = tlsCertificateConfiguration.Password,
-            };
-        }
-
-        // Build files that need to be created inside the container
-        var createFiles = await BuildCreateFilesAsync(
-            buildCreateFilesContext,
-            cancellationToken).ConfigureAwait(false);
-
-        if (customBundleFiles.Count > 0)
-        {
-            createFiles.Add(new ContainerCreateFileSystem
-            {
-                Destination = certificatesDestination,
-                Entries = [
-                    new ContainerFileSystemEntry
-                    {
-                        Name = "bundles",
-                        Type = ContainerFileSystemEntryType.Directory,
-                        Entries = customBundleFiles,
-                    },
-                ],
-            });
-        }
-
-        if (tlsCertificateConfiguration is not null)
-        {
-            var thumbprint = tlsCertificateConfiguration.Certificate.Thumbprint;
-            var publicCertificatePem = tlsCertificateConfiguration.Certificate.ExportCertificatePem();
-            (var keyPem, var pfxBytes) = await GetCertificateKeyMaterialAsync(tlsCertificateConfiguration, cancellationToken).ConfigureAwait(false);
-            var certificateFiles = new List<ContainerFileSystemEntry>()
-            {
-                new ContainerFileSystemEntry
-                {
-                    Name = thumbprint + ".crt",
-                    Type = ContainerFileSystemEntryType.File,
-                    Contents = new string(publicCertificatePem),
-                }
-            };
-
-            if (keyPem is not null)
-            {
-                certificateFiles.Add(new ContainerFileSystemEntry
-                {
-                    Name = thumbprint + ".key",
-                    Type = ContainerFileSystemEntryType.File,
-                    Contents = new string(keyPem),
-                });
-
-                Array.Clear(keyPem, 0, keyPem.Length);
-            }
-
-            if (pfxBytes is not null)
-            {
-                certificateFiles.Add(new ContainerFileSystemEntry
-                {
-                    Name = thumbprint + ".pfx",
-                    Type = ContainerFileSystemEntryType.File,
-                    RawContents = Convert.ToBase64String(pfxBytes),
-                });
-
-                Array.Clear(pfxBytes, 0, pfxBytes.Length);
-            }
-
-            // Write the certificate and key to the container filesystem
-            createFiles.Add(new ContainerCreateFileSystem
-            {
-                Destination = serverAuthCertificatesBasePath,
-                Entries = certificateFiles,
-            });
-        }
-
-        return (configuration, pemCertificates, createFiles);
-    }
-
-    private static async Task ApplyBuildArgumentsAsync(Container dcpContainerResource, IResource modelContainerResource, IServiceProvider serviceProvider, CancellationToken cancellationToken)
-    {
-        if (modelContainerResource.Annotations.OfType<DockerfileBuildAnnotation>().SingleOrDefault() is { } dockerfileBuildAnnotation)
-        {
-            // If there's a factory, generate the Dockerfile content and write it to the specified path
-            await DockerfileHelper.ExecuteDockerfileFactoryAsync(dockerfileBuildAnnotation, modelContainerResource, serviceProvider, cancellationToken).ConfigureAwait(false);
-
-            var dcpBuildArgs = new List<EnvVar>();
-
-            foreach (var buildArgument in dockerfileBuildAnnotation.BuildArguments)
-            {
-                var valueString = buildArgument.Value switch
-                {
-                    string stringValue => stringValue,
-                    IValueProvider valueProvider => await valueProvider.GetValueAsync(cancellationToken).ConfigureAwait(false),
-                    bool boolValue => boolValue ? "true" : "false",
-                    null => null,
-                    _ => buildArgument.Value.ToString()
-                };
-
-                var dcpBuildArg = new EnvVar()
-                {
-                    Name = buildArgument.Key,
-                    Value = valueString
-                };
-
-                dcpBuildArgs.Add(dcpBuildArg);
-            }
-
-            dcpContainerResource.Spec.Build = new()
-            {
-                Context = dockerfileBuildAnnotation.ContextPath,
-                Dockerfile = dockerfileBuildAnnotation.DockerfilePath,
-                Stage = dockerfileBuildAnnotation.Stage,
-                Args = dcpBuildArgs
-            };
-
-            var dcpBuildSecrets = new List<BuildContextSecret>();
-
-            foreach (var buildSecret in dockerfileBuildAnnotation.BuildSecrets)
-            {
-                var valueString = buildSecret.Value switch
-                {
-                    FileInfo filePath => filePath.FullName,
-                    IValueProvider valueProvider => await valueProvider.GetValueAsync(cancellationToken).ConfigureAwait(false),
-                    _ => throw new InvalidOperationException("Build secret can only be a parameter or a file.")
-                };
-
-                if (buildSecret.Value is FileInfo)
-                {
-                    var dcpBuildSecret = new BuildContextSecret
-                    {
-                        Id = buildSecret.Key,
-                        Type = "file",
-                        Source = valueString
-                    };
-                    dcpBuildSecrets.Add(dcpBuildSecret);
-                }
-                else
-                {
-                    var dcpBuildSecret = new BuildContextSecret
-                    {
-                        Id = buildSecret.Key,
-                        Type = "env",
-                        Value = valueString
-                    };
-                    dcpBuildSecrets.Add(dcpBuildSecret);
-                }
-            }
-
-            dcpContainerResource.Spec.Build = new()
-            {
-                Context = dockerfileBuildAnnotation.ContextPath,
-                Dockerfile = dockerfileBuildAnnotation.DockerfilePath,
-                Stage = dockerfileBuildAnnotation.Stage,
-                Args = dcpBuildArgs,
-                Secrets = dcpBuildSecrets
-            };
-        }
-    }
-
-    private void AddServicesProducedInfo(IResource modelResource, IAnnotationHolder dcpResource, RenderedModelResource appResource)
+    void IDcpExecutor.AddServicesProducedInfo(IResource modelResource, IAnnotationHolder dcpResource, RenderedModelResource appResource)
     {
         var modelResourceName = "(unknown)";
         try
@@ -2173,14 +1150,14 @@ internal sealed partial class DcpExecutor : IDcpExecutor, IAsyncDisposable
 
                     await _executorEvents.PublishAsync(new OnConnectionStringAvailableContext(cancellationToken, appResource.ModelResource)).ConfigureAwait(false);
                     await _executorEvents.PublishAsync(new OnResourceStartingContext(cancellationToken, resourceType, appResource.ModelResource, appResource.DcpResourceName)).ConfigureAwait(false);
-                    await CreateDcpContainerAsync(appResource, resourceLogger, cancellationToken).ConfigureAwait(false);
+                    await _containerCreator.CreateDcpContainerAsync(appResource, resourceLogger, cancellationToken).ConfigureAwait(false);
                     break;
                 case Executable e:
                     await EnsureResourceDeletedAsync<Executable>(appResource.DcpResourceName).ConfigureAwait(false);
 
                     await _executorEvents.PublishAsync(new OnConnectionStringAvailableContext(cancellationToken, appResource.ModelResource)).ConfigureAwait(false);
                     await _executorEvents.PublishAsync(new OnResourceStartingContext(cancellationToken, resourceType, appResource.ModelResource, appResource.DcpResourceName)).ConfigureAwait(false);
-                    await CreateExecutableAsync(appResource, resourceLogger, cancellationToken).ConfigureAwait(false);
+                    await _executableCreator.CreateExecutableAsync(appResource, resourceLogger, cancellationToken).ConfigureAwait(false);
                     break;
 
                 default:
@@ -2260,306 +1237,6 @@ internal sealed partial class DcpExecutor : IDcpExecutor, IAsyncDisposable
         }
     }
 
-    private class BuildCreateFilesContext
-    {
-        public required IResource Resource { get; init; }
-        public CertificateTrustScope CertificateTrustScope { get; init; }
-        public string? CertificateTrustBundlePath { get; set; }
-        public string? CertificateTrustDirectoriesPath { get; set; }
-        public ContainerFileSystemCallbackHttpsCertificateContext? HttpsCertificateContext { get; set; }
-    }
-
-    private async Task<List<ContainerCreateFileSystem>> BuildCreateFilesAsync(BuildCreateFilesContext context, CancellationToken cancellationToken)
-    {
-        var createFiles = new List<ContainerCreateFileSystem>();
-
-        if (context.Resource.TryGetAnnotationsOfType<ContainerFileSystemCallbackAnnotation>(out var createFileAnnotations))
-        {
-            foreach (var a in createFileAnnotations)
-            {
-                var entries = await a.Callback(
-                    new()
-                    {
-                        Model = context.Resource,
-                        ServiceProvider = _executionContext.ServiceProvider,
-                        HttpsCertificateContext = context.HttpsCertificateContext,
-                    },
-                    cancellationToken).ConfigureAwait(false);
-
-                if (entries?.Any() != true)
-                {
-                    continue;
-                }
-
-                createFiles.Add(new ContainerCreateFileSystem
-                {
-                    Destination = a.DestinationPath,
-                    DefaultOwner = a.DefaultOwner,
-                    DefaultGroup = a.DefaultGroup,
-                    Umask = (int?)a.Umask,
-                    Entries = entries.Select(e => e.ToContainerFileSystemEntry()).ToList(),
-                });
-            }
-        }
-
-        return createFiles;
-    }
-
-    private async Task<(List<string>, bool)> BuildRunArgsAsync(ILogger resourceLogger, IResource modelResource, CancellationToken cancellationToken)
-    {
-        var failedToApplyArgs = false;
-        var runArgs = new List<string>();
-
-        await modelResource.ProcessContainerRuntimeArgValues(
-            _executionContext,
-            (a, ex) =>
-            {
-                if (ex is not null)
-                {
-                    failedToApplyArgs = true;
-                    resourceLogger.LogCritical(ex, "Failed to apply argument value '{ArgKey}'. A dependency may have failed to start.", a);
-                    _logger.LogDebug(ex, "Failed to apply argument value '{ArgKey}' to '{ResourceName}'. A dependency may have failed to start.", a, modelResource.Name);
-                }
-                else if (a is string s)
-                {
-                    runArgs.Add(s);
-                }
-            },
-            resourceLogger,
-            cancellationToken).ConfigureAwait(false);
-
-        return (runArgs, failedToApplyArgs);
-    }
-
-    /// <summary>
-    /// Returns the certificate PEM format key and/or PFX bytes based on the provided configuration.
-    /// Only the formats referenced in resource configuration will be returned.
-    /// </summary>
-    /// <param name="configuration">The configuration details.</param>
-    /// <param name="cancellationToken">A token that can be used to cancel the operation.</param>
-    /// <returns>A tuple containing the PEM-encoded key and PFX bytes, if appropriate for the configuration.</returns>
-    /// <exception cref="InvalidOperationException"></exception>
-    private async Task<(char[]? keyPem, byte[]? pfxBytes)> GetCertificateKeyMaterialAsync(HttpsCertificateExecutionConfigurationData configuration, CancellationToken cancellationToken)
-    {
-        var certificate = configuration.Certificate;
-        var lookup = certificate.Thumbprint;
-        if (configuration.Password is not null)
-        {
-            lookup += $"-{configuration.Password}";
-        }
-
-        lookup = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(lookup)));
-
-        char[]? pemKey = null;
-        byte[]? pfxBytes = null;
-        // Ensure only one thread at a time is resolving certificates to avoid concurrent cache misses all trying to update
-        // the cache at the same time.
-        await _serverCertificateCacheSemaphore.WaitAsync(cancellationToken).ConfigureAwait(false);
-        try
-        {
-            if (configuration.IsKeyPathReferenced)
-            {
-                var keyFileName = Path.Join(s_macOSUserDevCertificateLocation, $"{lookup}.key");
-                if (OperatingSystem.IsMacOS() && certificate.IsAspNetCoreDevelopmentCertificate())
-                {
-                    // On MacOS, we cache development certificate key material to avoid triggering repeated keychain prompts
-                    // when referencing the development certificate key. We don't do this for other OSes or other certificates.
-                    try
-                    {
-                        // Attempt to read the cached development certificate key
-                        if (File.Exists(keyFileName))
-                        {
-                            var keyCandidate = File.ReadAllText(keyFileName);
-
-                            if (!string.IsNullOrEmpty(keyCandidate))
-                            {
-                                pemKey = keyCandidate.ToCharArray();
-                            }
-                        }
-                    }
-                    catch
-                    {
-                        // Ignore errors and retrieve the key from the certificate
-                    }
-                }
-
-                if (pemKey is null)
-                {
-                    // See: https://github.com/dotnet/aspnetcore/blob/main/src/Shared/CertificateGeneration/CertificateManager.cs
-                    using var privateKey = certificate.GetRSAPrivateKey();
-                    if (privateKey is null)
-                    {
-                        throw new InvalidOperationException("The certificate does not have an associated RSA private key.");
-                    }
-
-                    var keyBytes = privateKey.ExportEncryptedPkcs8PrivateKey(
-                        configuration.Password ?? string.Empty,
-                        new PbeParameters(
-                            PbeEncryptionAlgorithm.Aes256Cbc,
-                            HashAlgorithmName.SHA256,
-                            iterationCount: configuration.Password is null ? 1 : 100_000));
-                    pemKey = PemEncoding.Write("ENCRYPTED PRIVATE KEY", keyBytes);
-
-                    if (configuration.Password is null)
-                    {
-                        using var tempKey = RSA.Create();
-                        tempKey.ImportFromEncryptedPem(pemKey, string.Empty);
-                        Array.Clear(keyBytes, 0, keyBytes.Length);
-                        Array.Clear(pemKey, 0, pemKey.Length);
-                        keyBytes = tempKey.ExportPkcs8PrivateKey();
-                        pemKey = PemEncoding.Write("PRIVATE KEY", keyBytes);
-                    }
-
-                    Array.Clear(keyBytes, 0, keyBytes.Length);
-
-                    if (pemKey is not null && OperatingSystem.IsMacOS() && certificate.IsAspNetCoreDevelopmentCertificate())
-                    {
-                        // On Mac, cache the development certificate key material if we had to load it from the keychain
-                        try
-                        {
-                            // Create the directory for storing macOS user dev certificates if it doesn't exist
-                            Directory.CreateDirectory(s_macOSUserDevCertificateLocation, UnixFileMode.UserExecute | UnixFileMode.UserWrite | UnixFileMode.UserRead);
-
-                            await File.WriteAllTextAsync(keyFileName, new string(pemKey), cancellationToken).ConfigureAwait(false);
-                        }
-                        catch
-                        {
-                            // This is a best effort caching operation
-                        }
-                    }
-                }
-            }
-
-            if (configuration.IsPfxPathReferenced)
-            {
-                var pfxFileName = Path.Join(s_macOSUserDevCertificateLocation, $"{lookup}.pfx");
-                if (OperatingSystem.IsMacOS() && certificate.IsAspNetCoreDevelopmentCertificate())
-                {
-                    // On MacOS, we cache development certificate key material to avoid triggering repeated keychain prompts
-                    // when referencing the development certificate key. We don't do this for other OSes or other certificates.
-                    try
-                    {
-                        // Attempt to read the cached development certificate key
-                        if (File.Exists(pfxFileName))
-                        {
-                            var pfxCandidate = File.ReadAllBytes(pfxFileName);
-                            if (pfxCandidate.Length > 0)
-                            {
-                                using var tempCert = new X509Certificate2(pfxCandidate, configuration.Password);
-                                if (tempCert.Thumbprint.Equals(certificate.Thumbprint, StringComparison.Ordinal))
-                                {
-                                    pfxBytes = pfxCandidate;
-                                }
-                            }
-                        }
-                    }
-                    catch
-                    {
-                        // Ignore errors and retrieve the key from the certificate
-                    }
-                }
-
-                if (pfxBytes is null)
-                {
-                    // On Mac, cache the development certificate pfx if we had to export it from the keychain
-                    pfxBytes = certificate.Export(X509ContentType.Pfx, configuration.Password);
-
-                    if (pfxBytes is not null && OperatingSystem.IsMacOS() && certificate.IsAspNetCoreDevelopmentCertificate())
-                    {
-                        try
-                        {
-                            // Create the directory for storing macOS user dev certificates if it doesn't exist
-                            Directory.CreateDirectory(s_macOSUserDevCertificateLocation, UnixFileMode.UserExecute | UnixFileMode.UserWrite | UnixFileMode.UserRead);
-
-                            File.WriteAllBytes(pfxFileName, pfxBytes);
-                        }
-                        catch
-                        {
-                            // This is a best effort caching operation
-                        }
-                    }
-                }
-            }
-        }
-        finally
-        {
-            _serverCertificateCacheSemaphore.Release();
-        }
-
-        return (pemKey, pfxBytes);
-    }
-
-    private static List<PemCertificate> BuildPemCertificateList(X509Certificate2Collection certificates)
-    {
-        return certificates.Select(c => new PemCertificate
-        {
-            Thumbprint = c.Thumbprint,
-            Contents = c.ExportCertificatePem(),
-        }).DistinctBy(cert => cert.Thumbprint).ToList();
-    }
-
-    private static List<ContainerPortSpec> BuildContainerPorts(RenderedModelResource cr)
-    {
-        var ports = new List<ContainerPortSpec>();
-
-        foreach (var sp in cr.ServicesProduced)
-        {
-            var ea = sp.EndpointAnnotation;
-
-            var portSpec = new ContainerPortSpec()
-            {
-                ContainerPort = ea.TargetPort,
-            };
-
-            if (!ea.IsProxied && ea.Port is int)
-            {
-                portSpec.HostPort = ea.Port;
-            }
-
-            switch (sp.EndpointAnnotation.Protocol)
-            {
-                case ProtocolType.Tcp:
-                    portSpec.Protocol = PortProtocol.TCP;
-                    break;
-                case ProtocolType.Udp:
-                    portSpec.Protocol = PortProtocol.UDP;
-                    break;
-            }
-
-            if (sp.EndpointAnnotation.TargetHost != KnownHostNames.Localhost)
-            {
-                portSpec.HostIP = sp.EndpointAnnotation.TargetHost;
-            }
-
-            ports.Add(portSpec);
-        }
-
-        return ports;
-    }
-
-    private static List<VolumeMount> BuildContainerMounts(IResource container)
-    {
-        var volumeMounts = new List<VolumeMount>();
-
-        if (container.TryGetContainerMounts(out var containerMounts))
-        {
-            foreach (var mount in containerMounts)
-            {
-                var volumeSpec = new VolumeMount
-                {
-                    Source = mount.Source,
-                    Target = mount.Target,
-                    Type = mount.Type == ContainerMountType.BindMount ? VolumeMountType.Bind : VolumeMountType.Volume,
-                    IsReadOnly = mount.IsReadOnly
-                };
-
-                volumeMounts.Add(volumeSpec);
-            }
-        }
-
-        return volumeMounts;
-    }
-
     private static bool TryGetEndpoint(IResource resource, string? endpointName, [NotNullWhen(true)] out EndpointAnnotation? endpoint)
     {
         endpoint = null;
@@ -2592,78 +1269,10 @@ internal sealed partial class DcpExecutor : IDcpExecutor, IAsyncDisposable
         }
     }
 
-    private record struct HostResourceWithEndpoints
-    (
-        IResourceWithEndpoints Resource,
-        IEnumerable<EndpointAnnotation> Endpoints
-    );
-
-    private static HostResourceWithEndpoints? AsHostResourceWithEndpoints(IResource resource)
-    {
-        if (resource is IResourceWithEndpoints rwe && !resource.IsContainer())
-        {
-            var endpoints = resource.Annotations.OfType<EndpointAnnotation>();
-            if (endpoints.Any())
-            {
-                return new HostResourceWithEndpoints(rwe, endpoints);
-            }
-        }
-
-        return null;
-    }
-
-    private async Task<IEnumerable<HostResourceWithEndpoints>> GetHostDependenciesAsync(IResource resource, CancellationToken cancellationToken)
-    {
-        var allDependencies = await ResourceExtensions.GetResourceDependenciesAsync(
-            resource,
-            _executionContext,
-            new ResourceDependencyDiscoveryOptions
-            {
-                DiscoveryMode = ResourceDependencyDiscoveryMode.DirectOnly,
-                CacheAnnotationCallbackResults = true,
-            },
-            cancellationToken
-        ).ConfigureAwait(false);
-
-        // Host dependencies are host network resources with endpoints that containers depend on.
-        List<HostResourceWithEndpoints> hostDependencies = [.. allDependencies.Select(AsHostResourceWithEndpoints).OfType<HostResourceWithEndpoints>()];
-
-        // Aspire dashboard is special in the context of Open Telemetry ingestion.
-        // OTLP exporters do not refer to the OTLP ingestion endpoint via EndpointReference when the model is constructed
-        // by the Aspire app host; the endpoint URL is just read from configuration.
-        // If there are containers that are OTLP exporters in the model, we need to project dashboard endpoints into container space.
-        if (resource.TryGetAnnotationsOfType<OtlpExporterAnnotation>(out _))
-        {
-            var maybeDashboard = _model.Resources.Where(r => StringComparers.ResourceName.Equals(r.Name, KnownResourceNames.AspireDashboard))
-                    .Select(AsHostResourceWithEndpoints).FirstOrDefault();
-            if (maybeDashboard is HostResourceWithEndpoints dashboardResource)
-            {
-                hostDependencies.Add(dashboardResource);
-            }
-        }
-
-        return hostDependencies;
-    }
-
-    private AppResource CreateTunnelProxyResource(List<TunnelConfiguration>? tunnels)
-    {
-        Debug.Assert(_options.Value.EnableAspireContainerTunnel, "This method should only be called if the container tunnel feature is enabled.");
-        Debug.Assert(!_appResources.Any(ar => ar.DcpResource is ContainerNetworkTunnelProxy), "This method should only be called if a tunnel proxy resource hasn't already been created.");
-
-        var tunnelProxy = ContainerNetworkTunnelProxy.Create(GetTunnelProxyResourceName());
-        tunnelProxy.Spec.ContainerNetworkName = KnownNetworkIdentifiers.DefaultAspireContainerNetwork.Value;
-        tunnelProxy.Spec.Aliases = [ContainerHostName];
-        tunnelProxy.Spec.Tunnels = tunnels;
-        var tunnelAppResource = new AppResource(tunnelProxy);
-        _appResources.Add(tunnelAppResource);
-        return tunnelAppResource;
-    }
-
-    private string GetTunnelProxyResourceName()
-    {
-        Debug.Assert(_options.Value.EnableAspireContainerTunnel, "This method should only be called if the container tunnel feature is enabled.");
-        return KnownNetworkIdentifiers.DefaultAspireContainerNetwork.Value + "-tunnelproxy";
-    }
+    async Task IDcpExecutor.PublishEndpointAllocatedEventAsync(
+        IEnumerable<RenderedModelResource> resource,
+        CancellationToken ct)
+        => await PublishEndpointAllocatedEventAsync(resource, ct).ConfigureAwait(false);
 
     private async Task PublishEndpointAllocatedEventAsync(
         IEnumerable<RenderedModelResource> resource,
