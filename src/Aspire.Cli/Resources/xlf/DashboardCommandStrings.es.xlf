@@ -1,0 +1,32 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<xliff xmlns="urn:oasis:names:tc:xliff:document:1.2" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" version="1.2" xsi:schemaLocation="urn:oasis:names:tc:xliff:document:1.2 xliff-core-1.2-transitional.xsd">
+  <file datatype="xml" source-language="en" target-language="es" original="../DashboardCommandStrings.resx">
+    <body>
+      <trans-unit id="BundleNotAvailable">
+        <source>The Aspire dashboard requires the CLI bundle. The bundle was not found.</source>
+        <target state="new">The Aspire dashboard requires the CLI bundle. The bundle was not found.</target>
+        <note />
+      </trans-unit>
+      <trans-unit id="DashboardExitedWithError">
+        <source>Dashboard exited with exit code {0}.</source>
+        <target state="new">Dashboard exited with exit code {0}.</target>
+        <note />
+      </trans-unit>
+      <trans-unit id="DashboardStarted">
+        <source>Dashboard started (PID {0}).</source>
+        <target state="new">Dashboard started (PID {0}).</target>
+        <note />
+      </trans-unit>
+      <trans-unit id="Description">
+        <source>Start the Aspire dashboard</source>
+        <target state="new">Start the Aspire dashboard</target>
+        <note />
+      </trans-unit>
+      <trans-unit id="DetachOptionDescription">
+        <source>Run the dashboard in the background</source>
+        <target state="new">Run the dashboard in the background</target>
+        <note />
+      </trans-unit>
+    </body>
+  </file>
+</xliff>

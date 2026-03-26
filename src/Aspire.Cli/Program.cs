@@ -454,6 +454,7 @@ public class Program
         builder.Services.AddTransient<CertificatesCleanCommand>();
         builder.Services.AddTransient<CertificatesTrustCommand>();
         builder.Services.AddTransient<DoctorCommand>();
+        builder.Services.AddTransient<DashboardCommand>();
         builder.Services.AddTransient<UpdateCommand>();
         builder.Services.AddTransient<DeployCommand>();
         builder.Services.AddTransient<DoCommand>();
