@@ -93,15 +93,15 @@ internal sealed class TelemetrySpansCommand : BaseCommand
             return ExitCodeConstants.InvalidCommand;
         }
 
-        var (success, baseUrl, apiToken, _, exitCode) = await TelemetryCommandHelpers.GetDashboardApiAsync(
-            _connectionResolver, _interactionService, passedAppHostProjectFile, dashboardUrl, apiKey, cancellationToken);
+        var dashboardApi = await TelemetryCommandHelpers.GetDashboardApiAsync(
+            _connectionResolver, _interactionService, passedAppHostProjectFile, dashboardUrl, apiKey, requireDashboard: true, cancellationToken);
 
-        if (!success)
+        if (!dashboardApi.Success)
         {
-            return exitCode;
+            return dashboardApi.ExitCode;
         }
 
-        return await FetchSpansAsync(baseUrl!, apiToken!, resourceName, traceId, hasError, limit, follow, format, dashboardUrl, cancellationToken);
+        return await FetchSpansAsync(dashboardApi.BaseUrl!, dashboardApi.ApiToken!, resourceName, traceId, hasError, limit, follow, format, dashboardOnly: dashboardUrl is not null, cancellationToken);
     }
 
     private async Task<int> FetchSpansAsync(
@@ -113,7 +113,7 @@ internal sealed class TelemetrySpansCommand : BaseCommand
         int? limit,
         bool follow,
         OutputFormat format,
-        string? dashboardUrl,
+        bool dashboardOnly,
         CancellationToken cancellationToken)
     {
         using var client = TelemetryCommandHelpers.CreateApiClient(_httpClientFactory, apiToken);
@@ -168,7 +168,7 @@ internal sealed class TelemetrySpansCommand : BaseCommand
         catch (HttpRequestException ex)
         {
             _logger.LogError(ex, "Failed to fetch spans from Dashboard API");
-            var errorMessage = await TelemetryCommandHelpers.FormatTelemetryErrorMessageAsync(ex, baseUrl, dashboardUrl, _httpClientFactory, _logger, cancellationToken);
+            var errorMessage = await TelemetryCommandHelpers.FormatTelemetryErrorMessageAsync(ex, baseUrl, dashboardOnly, _httpClientFactory, _logger, cancellationToken);
             _interactionService.DisplayError(errorMessage);
             return ExitCodeConstants.DashboardFailure;
         }

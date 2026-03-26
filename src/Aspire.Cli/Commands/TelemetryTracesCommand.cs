@@ -90,21 +90,31 @@ internal sealed class TelemetryTracesCommand : BaseCommand
             return ExitCodeConstants.InvalidCommand;
         }
 
-        var (success, baseUrl, apiToken, _, exitCode) = await TelemetryCommandHelpers.GetDashboardApiAsync(
-            _connectionResolver, _interactionService, passedAppHostProjectFile, dashboardUrl, apiKey, cancellationToken);
+        var dashboardApi = await TelemetryCommandHelpers.GetDashboardApiAsync(
+            _connectionResolver, _interactionService, passedAppHostProjectFile, dashboardUrl, apiKey, requireDashboard: true, cancellationToken);
 
-        if (!success)
+        if (!dashboardApi.Success)
         {
-            return exitCode;
+            return dashboardApi.ExitCode;
         }
 
-        if (!string.IsNullOrEmpty(traceId))
+        try
         {
-            return await FetchSingleTraceAsync(baseUrl!, apiToken!, traceId, format, dashboardUrl, cancellationToken);
+            if (!string.IsNullOrEmpty(traceId))
+            {
+                return await FetchSingleTraceAsync(dashboardApi.BaseUrl!, dashboardApi.ApiToken!, traceId, format, cancellationToken);
+            }
+            else
+            {
+                return await FetchTracesAsync(dashboardApi.BaseUrl!, dashboardApi.ApiToken!, resourceName, hasError, limit, format, cancellationToken);
+            }
         }
-        else
+        catch (HttpRequestException ex)
         {
-            return await FetchTracesAsync(baseUrl!, apiToken!, resourceName, hasError, limit, format, dashboardUrl, cancellationToken);
+            _logger.LogError(ex, "Failed to fetch traces from Dashboard API");
+            var errorMessage = await TelemetryCommandHelpers.FormatTelemetryErrorMessageAsync(ex, dashboardApi.BaseUrl!, dashboardUrl is not null, _httpClientFactory, _logger, cancellationToken);
+            _interactionService.DisplayError(errorMessage);
+            return ExitCodeConstants.DashboardFailure;
         }
     }
 
@@ -113,7 +123,6 @@ internal sealed class TelemetryTracesCommand : BaseCommand
         string apiToken,
         string traceId,
         OutputFormat format,
-        string? dashboardUrl,
         CancellationToken cancellationToken)
     {
         using var client = TelemetryCommandHelpers.CreateApiClient(_httpClientFactory, apiToken);
@@ -129,45 +138,35 @@ internal sealed class TelemetryTracesCommand : BaseCommand
 
         _logger.LogDebug("Fetching trace {TraceId} from {Url}", traceId, url);
 
-        try
+        var response = await client.GetAsync(url, cancellationToken);
+
+        if (response.StatusCode == System.Net.HttpStatusCode.NotFound)
         {
-            var response = await client.GetAsync(url, cancellationToken);
-
-            if (response.StatusCode == System.Net.HttpStatusCode.NotFound)
-            {
-                _interactionService.DisplayError(string.Format(CultureInfo.CurrentCulture, TelemetryCommandStrings.TraceNotFound, traceId));
-                return ExitCodeConstants.InvalidCommand;
-            }
-
-            response.EnsureSuccessStatusCode();
-
-            if (!TelemetryCommandHelpers.HasJsonContentType(response))
-            {
-                _interactionService.DisplayError(TelemetryCommandStrings.UnexpectedContentType);
-                return ExitCodeConstants.DashboardFailure;
-            }
-
-            var json = await response.Content.ReadAsStringAsync(cancellationToken);
-
-            if (format == OutputFormat.Json)
-            {
-                // Structured output always goes to stdout.
-                _interactionService.DisplayRawText(json, ConsoleOutput.Standard);
-            }
-            else
-            {
-                DisplayTraceDetails(json, traceId, allOtlpResources);
-            }
-
-            return ExitCodeConstants.Success;
+            _interactionService.DisplayError(string.Format(CultureInfo.CurrentCulture, TelemetryCommandStrings.TraceNotFound, traceId));
+            return ExitCodeConstants.InvalidCommand;
         }
-        catch (HttpRequestException ex)
+
+        response.EnsureSuccessStatusCode();
+
+        if (!TelemetryCommandHelpers.HasJsonContentType(response))
         {
-            _logger.LogError(ex, "Failed to fetch trace from Dashboard API");
-            var errorMessage = await TelemetryCommandHelpers.FormatTelemetryErrorMessageAsync(ex, baseUrl, dashboardUrl, _httpClientFactory, _logger, cancellationToken);
-            _interactionService.DisplayError(errorMessage);
+            _interactionService.DisplayError(TelemetryCommandStrings.UnexpectedContentType);
             return ExitCodeConstants.DashboardFailure;
         }
+
+        var json = await response.Content.ReadAsStringAsync(cancellationToken);
+
+        if (format == OutputFormat.Json)
+        {
+            // Structured output always goes to stdout.
+            _interactionService.DisplayRawText(json, ConsoleOutput.Standard);
+        }
+        else
+        {
+            DisplayTraceDetails(json, traceId, allOtlpResources);
+        }
+
+        return ExitCodeConstants.Success;
     }
 
     private async Task<int> FetchTracesAsync(
@@ -177,7 +176,6 @@ internal sealed class TelemetryTracesCommand : BaseCommand
         bool? hasError,
         int? limit,
         OutputFormat format,
-        string? dashboardUrl,
         CancellationToken cancellationToken)
     {
         using var client = TelemetryCommandHelpers.CreateApiClient(_httpClientFactory, apiToken);
@@ -212,38 +210,28 @@ internal sealed class TelemetryTracesCommand : BaseCommand
 
         _logger.LogDebug("Fetching traces from {Url}", url);
 
-        try
+        var response = await client.GetAsync(url, cancellationToken);
+        response.EnsureSuccessStatusCode();
+
+        if (!TelemetryCommandHelpers.HasJsonContentType(response))
         {
-            var response = await client.GetAsync(url, cancellationToken);
-            response.EnsureSuccessStatusCode();
-
-            if (!TelemetryCommandHelpers.HasJsonContentType(response))
-            {
-                _interactionService.DisplayError(TelemetryCommandStrings.UnexpectedContentType);
-                return ExitCodeConstants.DashboardFailure;
-            }
-
-            var json = await response.Content.ReadAsStringAsync(cancellationToken);
-
-            if (format == OutputFormat.Json)
-            {
-                // Structured output always goes to stdout.
-                _interactionService.DisplayRawText(json, ConsoleOutput.Standard);
-            }
-            else
-            {
-                DisplayTracesTable(json, allOtlpResources);
-            }
-
-            return ExitCodeConstants.Success;
-        }
-        catch (HttpRequestException ex)
-        {
-            _logger.LogError(ex, "Failed to fetch traces from Dashboard API");
-            var errorMessage = await TelemetryCommandHelpers.FormatTelemetryErrorMessageAsync(ex, baseUrl, dashboardUrl, _httpClientFactory, _logger, cancellationToken);
-            _interactionService.DisplayError(errorMessage);
+            _interactionService.DisplayError(TelemetryCommandStrings.UnexpectedContentType);
             return ExitCodeConstants.DashboardFailure;
         }
+
+        var json = await response.Content.ReadAsStringAsync(cancellationToken);
+
+        if (format == OutputFormat.Json)
+        {
+            // Structured output always goes to stdout.
+            _interactionService.DisplayRawText(json, ConsoleOutput.Standard);
+        }
+        else
+        {
+            DisplayTracesTable(json, allOtlpResources);
+        }
+
+        return ExitCodeConstants.Success;
     }
 
     private void DisplayTracesTable(string json, IReadOnlyList<IOtlpResource> allResources)

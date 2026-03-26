@@ -119,20 +119,31 @@ internal static class TelemetryCommandHelpers
     /// <summary>
     /// Resolves an AppHost connection and gets Dashboard API info.
     /// </summary>
-    /// <returns>A tuple with success status, base URL, API token, dashboard UI URL, and exit code if failed.</returns>
-    public static async Task<(bool Success, string? BaseUrl, string? ApiToken, string? DashboardUrl, int ExitCode)> GetDashboardApiAsync(
+    /// <param name="connectionResolver">The connection resolver for AppHost discovery.</param>
+    /// <param name="interactionService">The interaction service for displaying messages.</param>
+    /// <param name="projectFile">The optional AppHost project file.</param>
+    /// <param name="dashboardUrl">The optional direct dashboard URL (mutually exclusive with <paramref name="projectFile"/>).</param>
+    /// <param name="apiKey">The optional API key for dashboard authentication.</param>
+    /// <param name="requireDashboard">
+    /// When <c>true</c>, a missing Dashboard API is a hard error.
+    /// When <c>false</c>, a missing Dashboard API is non-fatal and the method returns success with <c>null</c> base URL and token.
+    /// </param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>A <see cref="DashboardApiResult"/> with the resolved connection and dashboard API info.</returns>
+    public static async Task<DashboardApiResult> GetDashboardApiAsync(
         AppHostConnectionResolver connectionResolver,
         IInteractionService interactionService,
         FileInfo? projectFile,
         string? dashboardUrl,
         string? apiKey,
+        bool requireDashboard,
         CancellationToken cancellationToken)
     {
         // Validate mutual exclusivity of --apphost and --dashboard-url
         if (projectFile is not null && dashboardUrl is not null)
         {
             interactionService.DisplayError(TelemetryCommandStrings.DashboardUrlAndAppHostExclusive);
-            return (false, null, null, null, ExitCodeConstants.InvalidCommand);
+            return DashboardApiResult.Failure(ExitCodeConstants.InvalidCommand);
         }
 
         // Direct dashboard URL mode — bypass AppHost discovery
@@ -141,11 +152,11 @@ internal static class TelemetryCommandHelpers
             if (!UrlHelper.IsHttpUrl(dashboardUrl))
             {
                 interactionService.DisplayError(string.Format(CultureInfo.CurrentCulture, TelemetryCommandStrings.DashboardUrlInvalid, dashboardUrl));
-                return (false, null, null, null, ExitCodeConstants.InvalidCommand);
+                return DashboardApiResult.Failure(ExitCodeConstants.InvalidCommand);
             }
 
             var token = apiKey ?? string.Empty;
-            return (true, dashboardUrl, token, dashboardUrl, 0);
+            return new DashboardApiResult(true, null, dashboardUrl, token, dashboardUrl, 0);
         }
 
         var result = await connectionResolver.ResolveConnectionAsync(
@@ -158,20 +169,27 @@ internal static class TelemetryCommandHelpers
         if (!result.Success)
         {
             interactionService.DisplayMessage(KnownEmojis.Information, result.ErrorMessage);
-            return (false, null, null, null, ExitCodeConstants.Success);
+            return DashboardApiResult.Failure(ExitCodeConstants.Success);
         }
 
-        var dashboardInfo = await result.Connection!.GetDashboardInfoV2Async(cancellationToken);
+        var connection = result.Connection!;
+        var dashboardInfo = await connection.GetDashboardInfoV2Async(cancellationToken);
         if (dashboardInfo?.ApiBaseUrl is null || dashboardInfo.ApiToken is null)
         {
-            interactionService.DisplayError(TelemetryCommandStrings.DashboardApiNotAvailable);
-            return (false, null, null, null, ExitCodeConstants.DashboardFailure);
+            if (requireDashboard)
+            {
+                interactionService.DisplayError(TelemetryCommandStrings.DashboardApiNotAvailable);
+                return DashboardApiResult.Failure(ExitCodeConstants.DashboardFailure);
+            }
+
+            // Dashboard is optional — return success with null API info
+            return new DashboardApiResult(true, connection, null, null, null, 0);
         }
 
         // Extract dashboard base URL (without /login path) for hyperlinks
         var extractedDashboardUrl = ExtractDashboardBaseUrl(dashboardInfo.DashboardUrls?.FirstOrDefault());
 
-        return (true, dashboardInfo.ApiBaseUrl, dashboardInfo.ApiToken, extractedDashboardUrl, 0);
+        return new DashboardApiResult(true, connection, dashboardInfo.ApiBaseUrl, dashboardInfo.ApiToken, extractedDashboardUrl, 0);
     }
 
     /// <summary>
@@ -202,12 +220,12 @@ internal static class TelemetryCommandHelpers
     public static async Task<string> FormatTelemetryErrorMessageAsync(
         HttpRequestException ex,
         string baseUrl,
-        string? dashboardUrl,
+        bool dashboardOnly,
         IHttpClientFactory httpClientFactory,
         ILogger logger,
         CancellationToken cancellationToken)
     {
-        if (dashboardUrl is not null)
+        if (dashboardOnly)
         {
             return await GetDashboardApiErrorMessageAsync(ex, baseUrl, httpClientFactory, logger, cancellationToken);
         }
@@ -455,4 +473,28 @@ internal static class TelemetryCommandHelpers
         var otlpResource = new SimpleOtlpResource(resource.GetServiceName(), resource.GetServiceInstanceId());
         return OtlpHelpers.GetResourceName(otlpResource, allResources);
     }
+}
+
+/// <summary>
+/// Result of resolving the Dashboard API connection via <see cref="TelemetryCommandHelpers.GetDashboardApiAsync"/>.
+/// </summary>
+/// <param name="Success">Whether the resolution succeeded.</param>
+/// <param name="Connection">The AppHost backchannel connection, if resolved via an AppHost.</param>
+/// <param name="BaseUrl">The Dashboard API base URL, or <c>null</c> if the dashboard is unavailable.</param>
+/// <param name="ApiToken">The Dashboard API authentication token, or <c>null</c> if the dashboard is unavailable.</param>
+/// <param name="DashboardUrl">The Dashboard UI base URL for hyperlinks, or <c>null</c> if unavailable.</param>
+/// <param name="ExitCode">The exit code to return when <paramref name="Success"/> is <c>false</c>.</param>
+internal sealed record DashboardApiResult(
+    bool Success,
+    IAppHostAuxiliaryBackchannel? Connection,
+    string? BaseUrl,
+    string? ApiToken,
+    string? DashboardUrl,
+    int ExitCode)
+{
+    /// <summary>
+    /// Creates a failed result with the specified exit code.
+    /// </summary>
+    public static DashboardApiResult Failure(int exitCode)
+        => new(false, null, null, null, null, exitCode);
 }
