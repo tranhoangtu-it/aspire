@@ -100,7 +100,9 @@ internal sealed class ListStructuredLogsTool(IDashboardInfoProvider dashboardInf
         catch (HttpRequestException ex)
         {
             logger.LogError(ex, "Failed to fetch structured logs from Dashboard API");
-            var errorMessage = await TelemetryCommandHelpers.GetDashboardApiErrorMessageAsync(ex, apiBaseUrl, httpClientFactory, logger, cancellationToken);
+            var errorMessage = dashboardInfoProvider.IsDirectConnection
+                ? await TelemetryCommandHelpers.GetDashboardApiErrorMessageAsync(ex, apiBaseUrl, httpClientFactory, logger, cancellationToken)
+                : $"Failed to fetch structured logs: {ex.Message}";
             throw new McpProtocolException(errorMessage, McpErrorCode.InternalError);
         }
     }

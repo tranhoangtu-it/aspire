@@ -102,7 +102,8 @@ internal sealed class AgentMcpCommand : BaseCommand
 
         if (dashboardUrl is not null)
         {
-            if (!Uri.TryCreate(dashboardUrl, UriKind.Absolute, out _))
+            if (!Uri.TryCreate(dashboardUrl, UriKind.Absolute, out var parsedUri) ||
+                (parsedUri.Scheme != Uri.UriSchemeHttp && parsedUri.Scheme != Uri.UriSchemeHttps))
             {
                 _logger.LogError("Invalid --dashboard-url: {DashboardUrl}", dashboardUrl);
                 return ExitCodeConstants.InvalidCommand;

@@ -100,7 +100,9 @@ internal sealed class ListTracesTool(IDashboardInfoProvider dashboardInfoProvide
         catch (HttpRequestException ex)
         {
             logger.LogError(ex, "Failed to fetch traces from Dashboard API");
-            var errorMessage = await TelemetryCommandHelpers.GetDashboardApiErrorMessageAsync(ex, apiBaseUrl, httpClientFactory, logger, cancellationToken);
+            var errorMessage = dashboardInfoProvider.IsDirectConnection
+                ? await TelemetryCommandHelpers.GetDashboardApiErrorMessageAsync(ex, apiBaseUrl, httpClientFactory, logger, cancellationToken)
+                : $"Failed to fetch traces: {ex.Message}";
             throw new McpProtocolException(errorMessage, McpErrorCode.InternalError);
         }
     }

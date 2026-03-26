@@ -164,17 +164,8 @@ internal sealed class TelemetryTracesCommand : BaseCommand
         catch (HttpRequestException ex)
         {
             _logger.LogError(ex, "Failed to fetch trace from Dashboard API");
-
-            if (dashboardUrl is not null)
-            {
-                var errorMessage = await TelemetryCommandHelpers.GetDashboardApiErrorMessageAsync(ex, baseUrl, _httpClientFactory, _logger, cancellationToken);
-                _interactionService.DisplayError(errorMessage);
-            }
-            else
-            {
-                _interactionService.DisplayError(string.Format(CultureInfo.CurrentCulture, TelemetryCommandStrings.FailedToFetchTelemetry, ex.Message));
-            }
-
+            var errorMessage = await TelemetryCommandHelpers.FormatTelemetryErrorMessageAsync(ex, baseUrl, dashboardUrl, _httpClientFactory, _logger, cancellationToken);
+            _interactionService.DisplayError(errorMessage);
             return ExitCodeConstants.DashboardFailure;
         }
     }
@@ -249,17 +240,8 @@ internal sealed class TelemetryTracesCommand : BaseCommand
         catch (HttpRequestException ex)
         {
             _logger.LogError(ex, "Failed to fetch traces from Dashboard API");
-
-            if (dashboardUrl is not null)
-            {
-                var errorMessage = await TelemetryCommandHelpers.GetDashboardApiErrorMessageAsync(ex, baseUrl, _httpClientFactory, _logger, cancellationToken);
-                _interactionService.DisplayError(errorMessage);
-            }
-            else
-            {
-                _interactionService.DisplayError(string.Format(CultureInfo.CurrentCulture, TelemetryCommandStrings.FailedToFetchTelemetry, ex.Message));
-            }
-
+            var errorMessage = await TelemetryCommandHelpers.FormatTelemetryErrorMessageAsync(ex, baseUrl, dashboardUrl, _httpClientFactory, _logger, cancellationToken);
+            _interactionService.DisplayError(errorMessage);
             return ExitCodeConstants.DashboardFailure;
         }
     }

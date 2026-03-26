@@ -135,8 +135,10 @@ internal static class TelemetryCommandHelpers
             return (false, null, null, null, ExitCodeConstants.InvalidCommand);
         }
 
-        // Validate dashboard URL format
-        if (dashboardUrl is not null && !Uri.TryCreate(dashboardUrl, UriKind.Absolute, out _))
+        // Validate dashboard URL format and scheme
+        if (dashboardUrl is not null &&
+            (!Uri.TryCreate(dashboardUrl, UriKind.Absolute, out var parsedUri) ||
+             (parsedUri.Scheme != Uri.UriSchemeHttp && parsedUri.Scheme != Uri.UriSchemeHttps)))
         {
             interactionService.DisplayError(string.Format(CultureInfo.CurrentCulture, TelemetryCommandStrings.DashboardUrlInvalid, dashboardUrl));
             return (false, null, null, null, ExitCodeConstants.InvalidCommand);
@@ -194,6 +196,26 @@ internal static class TelemetryCommandHelpers
             client.DefaultRequestHeaders.Add(ApiKeyHeaderName, apiToken);
         }
         return client;
+    }
+
+    /// <summary>
+    /// Formats an error message for a telemetry HTTP failure, using dashboard-specific diagnostics
+    /// when a direct dashboard URL was provided, or a generic message otherwise.
+    /// </summary>
+    public static async Task<string> FormatTelemetryErrorMessageAsync(
+        HttpRequestException ex,
+        string baseUrl,
+        string? dashboardUrl,
+        IHttpClientFactory httpClientFactory,
+        ILogger logger,
+        CancellationToken cancellationToken)
+    {
+        if (dashboardUrl is not null)
+        {
+            return await GetDashboardApiErrorMessageAsync(ex, baseUrl, httpClientFactory, logger, cancellationToken);
+        }
+
+        return string.Format(CultureInfo.CurrentCulture, TelemetryCommandStrings.FailedToFetchTelemetry, ex.Message);
     }
 
     /// <summary>
