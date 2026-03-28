@@ -13,7 +13,6 @@ using Aspire.Hosting.Dcp.Model;
 using Aspire.Hosting.Utils;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
-using Microsoft.Extensions.Options;
 
 namespace Aspire.Hosting.Dcp;
 
@@ -22,9 +21,7 @@ namespace Aspire.Hosting.Dcp;
 /// </summary>
 internal sealed class ExecutableCreator
 {
-    private readonly IKubernetesService _kubernetesService;
     private readonly IConfiguration _configuration;
-    private readonly IOptions<DcpOptions> _options;
     private readonly DcpNameGenerator _nameGenerator;
     private readonly DistributedApplicationModel _model;
     private readonly DistributedApplicationOptions _distributedApplicationOptions;
@@ -36,9 +33,7 @@ internal sealed class ExecutableCreator
     private IDcpExecutor _executor = null!;
 
     public ExecutableCreator(
-        IKubernetesService kubernetesService,
         IConfiguration configuration,
-        IOptions<DcpOptions> options,
         DcpNameGenerator nameGenerator,
         DistributedApplicationModel model,
         DistributedApplicationOptions distributedApplicationOptions,
@@ -47,9 +42,7 @@ internal sealed class ExecutableCreator
         CertificateUtilities certificateUtilities,
         ILogger<ExecutableCreator> logger)
     {
-        _kubernetesService = kubernetesService;
         _configuration = configuration;
-        _options = options;
         _nameGenerator = nameGenerator;
         _model = model;
         _distributedApplicationOptions = distributedApplicationOptions;
@@ -70,11 +63,11 @@ internal sealed class ExecutableCreator
         PreparePlainExecutables();
     }
 
-    internal async Task CreateExecutableAsync(RenderedModelResource er, ILogger resourceLogger, CancellationToken cancellationToken)
+    internal async Task CreateExecutableAsync(RenderedModelResource<Executable> er, ILogger resourceLogger, CancellationToken cancellationToken)
     {
         if (er.DcpResource is not Executable exe)
         {
-            throw new InvalidOperationException($"Expected an Executable resource, but got {er.DcpResource.Kind} instead");
+            throw new InvalidOperationException($"Expected an Executable resource, but got {er.DcpResourceKind} instead");
         }
 
         cancellationToken.ThrowIfCancellationRequested();
@@ -137,7 +130,7 @@ internal sealed class ExecutableCreator
             }
         }
 
-        await _kubernetesService.CreateAsync(exe, cancellationToken).ConfigureAwait(false);
+        await _executor.CreateDcpObjectsAsync([exe], cancellationToken).ConfigureAwait(false);
     }
 
     private void PrepareProjectExecutables()
@@ -247,8 +240,8 @@ internal sealed class ExecutableCreator
 
                 exe.SetAnnotationAsObjectList(CustomResource.ResourceProjectArgsAnnotation, projectArgs);
 
-                var exeAppResource = new RenderedModelResource(project, exe);
-                _executor.AddServicesProducedInfo(project, exe, exeAppResource);
+                var exeAppResource = new RenderedModelResource<Executable>(project, exe);
+                _executor.AddServicesProducedInfo(exeAppResource);
                 _executor.AppResources.Add(exeAppResource);
             }
         }
@@ -287,14 +280,14 @@ internal sealed class ExecutableCreator
 
             DcpExecutor.SetInitialResourceState(executable, exe);
 
-            var exeAppResource = new RenderedModelResource(executable, exe);
-            _executor.AddServicesProducedInfo(executable, exe, exeAppResource);
+            var exeAppResource = new RenderedModelResource<Executable>(executable, exe);
+            _executor.AddServicesProducedInfo(exeAppResource);
             _executor.AppResources.Add(exeAppResource);
         }
     }
 
     private async Task<(IExecutionConfigurationResult Configuration, ExecutablePemCertificates? PemCertificates)>
-    BuildExecutableConfiguration(RenderedModelResource er, ILogger resourceLogger, CancellationToken cancellationToken)
+    BuildExecutableConfiguration(RenderedModelResource<Executable> er, ILogger resourceLogger, CancellationToken cancellationToken)
     {
         var exe = (Executable)er.DcpResource;
 
@@ -401,7 +394,7 @@ internal sealed class ExecutableCreator
         return (configuration, pemCertificates);
     }
 
-    private static List<(string Value, bool IsSensitive, bool Executable, bool Display)> BuildLaunchArgs(RenderedModelResource er, ExecutableSpec spec, IEnumerable<(string Value, bool IsSensitive)> appHostArgs)
+    private static List<(string Value, bool IsSensitive, bool Executable, bool Display)> BuildLaunchArgs(RenderedModelResource<Executable> er, ExecutableSpec spec, IEnumerable<(string Value, bool IsSensitive)> appHostArgs)
     {
         // Launch args is the final list of args that are displayed in the UI and possibly added to the executable spec.
         // They're built from app host resource model args and any args in the effective launch profile.

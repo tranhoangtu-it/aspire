@@ -50,7 +50,7 @@ internal sealed class DcpResourceWatcher : IConsoleLogsService, IAsyncDisposable
         ResourceLoggerService loggerService,
         DcpExecutorEvents executorEvents,
         DistributedApplicationModel model,
-        ConcurrentBag<AppResource> appResources,
+        ConcurrentBag<IAppResource> appResources,
         CancellationToken shutdownToken)
     {
         _kubernetesService = kubernetesService;
@@ -220,7 +220,7 @@ internal sealed class DcpResourceWatcher : IConsoleLogsService, IAsyncDisposable
         await StopAsync(cts.Token).ConfigureAwait(false);
     }
 
-    private async Task ProcessResourceChange<T>(WatchEventType watchEventType, T resource, ConcurrentDictionary<string, T> resourceByName, string resourceKind, Func<T, CustomResourceSnapshot, CustomResourceSnapshot> snapshotFactory) where T : CustomResource
+    private async Task ProcessResourceChange<T>(WatchEventType watchEventType, T resource, ConcurrentDictionary<string, T> resourceByName, string resourceKind, Func<T, CustomResourceSnapshot, CustomResourceSnapshot> snapshotFactory) where T : CustomResource, IKubernetesStaticMetadata
     {
         if (ProcessResourceChange(resourceByName, watchEventType, resource))
         {

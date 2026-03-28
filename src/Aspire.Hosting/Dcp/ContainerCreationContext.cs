@@ -11,7 +11,7 @@ namespace Aspire.Hosting.Dcp;
 /// </summary>
 internal record class ContainerNetworkService
 {
-    public required ServiceAppResource ServiceResource { get; init; }
+    public required AppResource<Service> ServiceResource { get; init; }
     public TunnelConfiguration? TunnelConfig { get; init; }
 }
 

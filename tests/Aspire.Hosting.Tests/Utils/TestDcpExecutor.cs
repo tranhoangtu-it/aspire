@@ -19,19 +19,23 @@ internal sealed class TestDcpExecutor : IDcpExecutor
 
     public Task StopAsync(CancellationToken cancellationToken) => Task.CompletedTask;
 
-    public Task StopResourceAsync(IResourceReference resourceReference, CancellationToken cancellationToken) => Task.CompletedTask;
+    public Task StopResourceAsync(IResourceReference resource, CancellationToken cancellationToken) => Task.CompletedTask;
 
-    public ConcurrentBag<AppResource> AppResources { get; } = [];
+    public ConcurrentBag<IAppResource> AppResources { get; } = [];
 
     public CancellationToken ShutdownToken => CancellationToken.None;
 
     public DcpSnapshotBuilder SnapshotBuilder => throw new NotImplementedException();
 
-    public void AddAllocatedEndpointInfo(IEnumerable<RenderedModelResource> resources, AllocatedEndpointsMode mode = AllocatedEndpointsMode.Workload) { }
+    public void AddAllocatedEndpointInfo<TDcpResource>(IEnumerable<RenderedModelResource<TDcpResource>> resources, AllocatedEndpointsMode mode = AllocatedEndpointsMode.Workload) where TDcpResource : CustomResource, IKubernetesStaticMetadata { }
 
-    public void AddServicesProducedInfo(IResource modelResource, IAnnotationHolder dcpResource, RenderedModelResource appResource) { }
+    public void AddServicesProducedInfo<TDcpResource>(RenderedModelResource<TDcpResource> appResource) where TDcpResource : CustomResource, IKubernetesStaticMetadata { }
 
-    public Task PublishEndpointAllocatedEventAsync(IEnumerable<RenderedModelResource> resources, CancellationToken cancellationToken) => Task.CompletedTask;
+    public Task PublishEndpointAllocatedEventAsync<TDcpResource>(IEnumerable<RenderedModelResource<TDcpResource>> resources, CancellationToken cancellationToken) where TDcpResource : CustomResource, IKubernetesStaticMetadata => Task.CompletedTask;
 
-    public Task CreateRenderedResourcesAsync(Func<RenderedModelResource, ILogger, CancellationToken, Task> createResourceFunc, IEnumerable<RenderedModelResource> resources, string resourceKind, CancellationToken cancellationToken) => Task.CompletedTask;
+    public Task CreateRenderedResourcesAsync<TDcpResource>(Func<RenderedModelResource<TDcpResource>, ILogger, CancellationToken, Task> createResourceFunc, IEnumerable<RenderedModelResource<TDcpResource>> resources, CancellationToken cancellationToken) where TDcpResource : CustomResource, IKubernetesStaticMetadata => Task.CompletedTask;
+
+    public Task CreateDcpObjectsAsync<TDcpResource>(IEnumerable<TDcpResource> objects, CancellationToken cancellationToken) where TDcpResource : CustomResource, IKubernetesStaticMetadata => Task.CompletedTask;
+
+    public Task UpdateWithEffectiveAddressInfo(IEnumerable<Service> services, CancellationToken cancellationToken, TimeSpan? timeout = null) => Task.CompletedTask;
 }

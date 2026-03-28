@@ -7,21 +7,31 @@ using System.Diagnostics;
 
 namespace Aspire.Hosting.Dcp;
 
-[DebuggerDisplay("DcpResourceName = {DcpResourceName}, DcpResourceKind = {DcpResourceKind}")]
-internal class AppResource: IEquatable<AppResource>
+internal interface IAppResource
 {
-    public CustomResource DcpResource { get; }
+    CustomResource DcpResource { get; }
+    string DcpResourceName { get; }
+    string DcpResourceKind { get; }
+    List<AppResource<Service>> ServicesProduced { get; }
+}
+
+[DebuggerDisplay("DcpResourceName = {DcpResourceName}, DcpResourceKind = {DcpResourceKind}")]
+internal class AppResource<TDcpResource>: IAppResource, IEquatable<AppResource<TDcpResource>> where TDcpResource : CustomResource, IKubernetesStaticMetadata
+{
+    public TDcpResource DcpResource { get; }
     public string DcpResourceName => DcpResource.Metadata.Name;
-    public string DcpResourceKind => DcpResource.Kind;
+    public string DcpResourceKind => TDcpResource.ObjectKind;
+
+    CustomResource IAppResource.DcpResource => DcpResource;
     
-    public AppResource(CustomResource dcpResource)
+    public AppResource(TDcpResource dcpResource)
     {
         DcpResource = dcpResource;
     }
 
-    public virtual List<ServiceAppResource> ServicesProduced { get; } = [];
+    public virtual List<AppResource<Service>> ServicesProduced { get; } = [];
 
-    public bool Equals(AppResource? other)
+    public bool Equals(AppResource<TDcpResource>? other)
     {
         if (other is null)
         {
@@ -33,26 +43,14 @@ internal class AppResource: IEquatable<AppResource>
             dr.Metadata.Name == odr.Metadata.Name &&
             dr.Metadata.NamespaceProperty == odr.Metadata.NamespaceProperty;
     }
-}
-
-internal class ServiceAppResource : AppResource
-{
-    public Service Service => (Service)DcpResource;
-    public ServiceAppResource(Service service) : base(service)
-    {
-    }
-    public override List<ServiceAppResource> ServicesProduced
-    {
-        get { throw new InvalidOperationException("Service resources do not produce any services"); }
-    }
 }   
 
 [DebuggerDisplay("ModelResource = {ModelResource}, DcpResourceName = {DcpResourceName}, DcpResourceKind = {DcpResourceKind}")]
-internal class RenderedModelResource : AppResource, IResourceReference
+internal class RenderedModelResource<TDcpResource> : AppResource<TDcpResource>, IResourceReference where TDcpResource : CustomResource, IKubernetesStaticMetadata
 {
     public IResource ModelResource { get; }
     
-    public RenderedModelResource(IResource modelResource, CustomResource dcpResource): base(dcpResource)
+    public RenderedModelResource(IResource modelResource, TDcpResource dcpResource): base(dcpResource)
     {
         ModelResource = modelResource;
     }
@@ -61,9 +59,9 @@ internal class RenderedModelResource : AppResource, IResourceReference
     public virtual List<ServiceWithModelResource> ServicesConsumed { get; } = [];
 }
 
-internal sealed class ServiceWithModelResource : RenderedModelResource
+internal sealed class ServiceWithModelResource : RenderedModelResource<Service>
 {
-    public Service Service => (Service)DcpResource;
+    public Service Service => DcpResource;
     public EndpointAnnotation EndpointAnnotation { get; }
 
     public override List<ServiceWithModelResource> ServicesProduced

@@ -2842,9 +2842,7 @@ public class DcpExecutorTests
         var dcpDependencyCheckService = new TestDcpDependencyCheckService();
 
         var executableCreator = new ExecutableCreator(
-            ks,
             configuration,
-            Options.Create(dcpOptions),
             nameGenerator,
             distributedAppModel,
             new DistributedApplicationOptions(),
@@ -2854,7 +2852,6 @@ public class DcpExecutorTests
             NullLogger<ExecutableCreator>.Instance);
 
         var containerCreator = new ContainerCreator(
-            ks,
             configuration,
             Options.Create(dcpOptions),
             nameGenerator,
@@ -2876,7 +2873,6 @@ public class DcpExecutorTests
             ks,
             configuration,
             new Hosting.Eventing.DistributedApplicationEventing(),
-            new DistributedApplicationOptions(),
             Options.Create(dcpOptions),
             executionContext,
             resourceLoggerService,

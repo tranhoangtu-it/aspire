@@ -47,7 +47,6 @@ internal record struct HostResourceWithEndpoints(
 /// </summary>
 internal sealed class ContainerCreator
 {
-    private readonly IKubernetesService _kubernetesService;
     private readonly IConfiguration _configuration;
     private readonly IOptions<DcpOptions> _options;
     private readonly DcpNameGenerator _nameGenerator;
@@ -63,7 +62,6 @@ internal sealed class ContainerCreator
     private IDcpExecutor _executor = null!;
 
     public ContainerCreator(
-        IKubernetesService kubernetesService,
         IConfiguration configuration,
         IOptions<DcpOptions> options,
         DcpNameGenerator nameGenerator,
@@ -76,7 +74,6 @@ internal sealed class ContainerCreator
         IHostEnvironment hostEnvironment,
         ILogger<ContainerCreator> logger)
     {
-        _kubernetesService = kubernetesService;
         _configuration = configuration;
         _options = options;
         _nameGenerator = nameGenerator;
@@ -135,7 +132,7 @@ internal sealed class ContainerCreator
             network.Spec.NetworkName += $"-{shortApplicationName}";
         }
 
-        _executor.AppResources.Add(new AppResource(network));
+        _executor.AppResources.Add(new AppResource<ContainerNetwork>(network));
     }
 
     internal void PrepareContainers()
@@ -196,8 +193,8 @@ internal sealed class ContainerCreator
                 }
             };
 
-            var containerAppResource = new RenderedModelResource(container, ctr);
-            _executor.AddServicesProducedInfo(container, ctr, containerAppResource);
+            var containerAppResource = new RenderedModelResource<Container>(container, ctr);
+            _executor.AddServicesProducedInfo(containerAppResource);
             _executor.AppResources.Add(containerAppResource);
         }
     }
@@ -224,14 +221,14 @@ internal sealed class ContainerCreator
             containerExec.Annotate(CustomResource.ResourceNameAnnotation, containerExecutable.Name);
             DcpExecutor.SetInitialResourceState(containerExecutable, containerExec);
 
-            var exeAppResource = new RenderedModelResource(containerExecutable, containerExec);
+            var exeAppResource = new RenderedModelResource<ContainerExec>(containerExecutable, containerExec);
             _executor.AppResources.Add(exeAppResource);
         }
     }
 
     // ── Creation methods ──
 
-    internal async Task CreateSingleContainerAsync(RenderedModelResource cr, ContainerCreationContext cctx, CancellationToken cToken)
+    internal async Task CreateSingleContainerAsync(RenderedModelResource<Container> cr, ContainerCreationContext cctx, CancellationToken cToken)
     {
         var dcpContainer = (Container)cr.DcpResource;
         var signalServicesSpecReadyOnce = ConcurrencyUtils.Once(() => cctx.ContainerServicesSpecReady.Signal());
@@ -289,7 +286,7 @@ internal sealed class ContainerCreator
         }
     }
 
-    internal async Task CreateDcpContainerAsync(RenderedModelResource cr, ILogger logger, CancellationToken cToken)
+    internal async Task CreateDcpContainerAsync(RenderedModelResource<Container> cr, ILogger logger, CancellationToken cToken)
     {
         cToken.ThrowIfCancellationRequested();
 
@@ -348,23 +345,23 @@ internal sealed class ContainerCreator
             DcpDependencyCheck.CheckDcpInfoAndLogErrors(logger, _options.Value, dcpInfo);
         }
 
-        await _kubernetesService.CreateAsync(dcpContainer, cToken).ConfigureAwait(false);
+        await _executor.CreateDcpObjectsAsync(new[] { dcpContainer }, cToken).ConfigureAwait(false);
 
-        var containerExes = _executor.AppResources.OfType<RenderedModelResource>().Where(ar => ar.DcpResource is ContainerExec ce && ce.Spec.ContainerName == dcpContainer.Metadata.Name).ToArray();
+        var containerExes = _executor.AppResources.OfType<RenderedModelResource<ContainerExec>>().Where(ar => ar.DcpResource.Spec.ContainerName == dcpContainer.Metadata.Name).ToArray();
         if (containerExes.Length > 0)
         {
-            await _executor.CreateRenderedResourcesAsync(CreateContainerExecutableAsync, containerExes, Model.Dcp.ContainerExecKind, cToken).ConfigureAwait(false);
+            await _executor.CreateRenderedResourcesAsync(CreateContainerExecutableAsync, containerExes, cToken).ConfigureAwait(false);
         }
     }
 
-    internal async Task CreateContainerExecutableAsync(RenderedModelResource er, ILogger resourceLogger, CancellationToken cancellationToken)
+    internal async Task CreateContainerExecutableAsync(RenderedModelResource<ContainerExec> er, ILogger _, CancellationToken cancellationToken)
     {
         if (er.DcpResource is not ContainerExec containerExe)
         {
-            throw new InvalidOperationException($"Expected an {nameof(ContainerExec)} resource, but got {er.DcpResource.Kind} instead");
+            throw new InvalidOperationException($"Expected an {nameof(ContainerExec)} resource, but got {er.DcpResourceKind} instead");
         }
 
-        await _kubernetesService.CreateAsync(containerExe, cancellationToken).ConfigureAwait(false);
+        await _executor.CreateDcpObjectsAsync([containerExe], cancellationToken).ConfigureAwait(false);
     }
 
     // ── Tunnel and network service methods ──
@@ -422,25 +419,55 @@ internal sealed class ContainerCreator
             svc.Annotate(CustomResource.PrimaryServiceNameAnnotation, serverSvc.DcpResource.Metadata.Name);
             svc.Annotate(CustomResource.ContainerTunnelInstanceName, tunnelProxyName);
 
-            var svcAppResource = new ServiceAppResource(svc);
+            var svcAppResource = new AppResource<Service>(svc);
             services.Add(new ContainerNetworkService { ServiceResource = svcAppResource, TunnelConfig = tunnelConfig });
         }
 
         return services;
     }
 
-    internal async Task<AppResource> CreateTunnelProxyResourceAsync(List<TunnelConfiguration>? tunnels, CancellationToken cancellationToken = default)
+    internal async Task<AppResource<ContainerNetworkTunnelProxy>> CreateTunnelProxyResourceAsync(List<TunnelConfiguration>? tunnels, CancellationToken cancellationToken = default)
     {
         Debug.Assert(_options.Value.EnableAspireContainerTunnel, "This method should only be called if the container tunnel feature is enabled.");
-        Debug.Assert(!_executor.AppResources.Any(ar => ar.DcpResource is ContainerNetworkTunnelProxy), "This method should only be called if a tunnel proxy resource hasn't already been created.");
+        Debug.Assert(!_executor.AppResources.OfType<AppResource<ContainerNetworkTunnelProxy>>().Any(), "This method should only be called if a tunnel proxy resource hasn't already been created.");
 
         var tunnelProxy = ContainerNetworkTunnelProxy.Create(GetTunnelProxyResourceName());
         tunnelProxy.Spec.ContainerNetworkName = KnownNetworkIdentifiers.DefaultAspireContainerNetwork.Value;
         tunnelProxy.Spec.Aliases = [await GetContainerHostNameAsync(cancellationToken).ConfigureAwait(false)];
         tunnelProxy.Spec.Tunnels = tunnels;
-        var tunnelAppResource = new AppResource(tunnelProxy);
+        var tunnelAppResource = new AppResource<ContainerNetworkTunnelProxy>(tunnelProxy);
         _executor.AppResources.Add(tunnelAppResource);
         return tunnelAppResource;
+    }
+
+    /// <summary>
+    /// Creates the container tunnel: reads tunnel service specs from the container creation context,
+    /// creates the corresponding DCP service and tunnel proxy objects, and waits for their addresses.
+    /// </summary>
+    internal async Task CreateTunnelAsync(ContainerCreationContext cctx, CancellationToken cancellationToken)
+    {
+        // Container creation tasks need to figure out dependencies of each container 
+        // and then create Service and TunnelConfiguration definitions for each of them.
+        cctx.ContainerServicesSpecReady.Wait(cancellationToken);
+        cctx.ContainerServicesChan.Writer.Complete();
+
+        // Now create the container network services for the host resources, update the tunnel, and advertise AllocatedEndpoints.
+        var containerNetworkServices = cctx.ContainerServicesChan.Reader.ReadAllAsync(cancellationToken).ToBlockingEnumerable(cancellationToken).ToArray();
+        _executor.AppResources.AddRange(containerNetworkServices.Select(cns => cns.ServiceResource));
+        var serviceObjects = containerNetworkServices.Select(cns => cns.ServiceResource.DcpResource).ToArray();
+        await _executor.CreateDcpObjectsAsync(serviceObjects, cancellationToken).ConfigureAwait(false);
+
+        var tunnels = containerNetworkServices.Where(s => s.TunnelConfig is not null).Select(s => s.TunnelConfig!).ToList();
+        Debug.Assert(tunnels.Count == containerNetworkServices.Length, "Each tunneled service should have a tunnel config");
+        await CreateTunnelProxyResourceAsync(tunnels, cancellationToken).ConfigureAwait(false);
+
+        // Create all ContainerNetworkTunnelProxy objects that have been prepared.
+        var tunnelProxies = _executor.AppResources.OfType<AppResource<ContainerNetworkTunnelProxy>>().Select(r => r.DcpResource);
+        await _executor.CreateDcpObjectsAsync(tunnelProxies, cancellationToken).ConfigureAwait(false);
+
+        // Container tunnel initialization can take a while if the container tunnel image needs to be built,
+        // especially if the required image pull is slow, hence 10 minute timeout here.
+        await _executor.UpdateWithEffectiveAddressInfo(serviceObjects, cancellationToken, TimeSpan.FromMinutes(10)).ConfigureAwait(false);
     }
 
     internal async Task<IEnumerable<HostResourceWithEndpoints>> GetHostDependenciesAsync(IResource resource, CancellationToken cancellationToken)
@@ -448,7 +475,11 @@ internal sealed class ContainerCreator
         var allDependencies = await ResourceExtensions.GetResourceDependenciesAsync(
             resource,
             _executionContext,
-            ResourceDependencyDiscoveryMode.DirectOnly | ResourceDependencyDiscoveryMode.CacheAnnotationCallbackResults,
+            new ResourceDependencyDiscoveryOptions
+            {
+                DiscoveryMode = ResourceDependencyDiscoveryMode.DirectOnly,
+                CacheAnnotationCallbackResults = true
+            },
             cancellationToken
         ).ConfigureAwait(false);
 
@@ -469,7 +500,7 @@ internal sealed class ContainerCreator
 
     // ── Private helpers ──
 
-    private async Task CreateTunnelDependentContainerAsync(RenderedModelResource cr, ImmutableArray<HostResourceWithEndpoints> hostDependencies, ContainerCreationContext cctx, Action signalServicesSpecReadyOnce, CancellationToken cToken)
+    private async Task CreateTunnelDependentContainerAsync(RenderedModelResource<Container> cr, ImmutableArray<HostResourceWithEndpoints> hostDependencies, ContainerCreationContext cctx, Action signalServicesSpecReadyOnce, CancellationToken cToken)
     {
         cToken.ThrowIfCancellationRequested();
 
@@ -500,7 +531,7 @@ internal sealed class ContainerCreator
     }
 
     private async Task<(IExecutionConfigurationResult, ContainerPemCertificates?, List<ContainerCreateFileSystem>?)>
-    BuildContainerConfiguration(RenderedModelResource cr, ILogger resourceLogger, CancellationToken cancellationToken)
+    BuildContainerConfiguration(RenderedModelResource<Container> cr, ILogger resourceLogger, CancellationToken cancellationToken)
     {
         var certificatesDestination = ContainerCertificatePathsAnnotation.DefaultCustomCertificatesDestination;
         var bundlePaths = ContainerCertificatePathsAnnotation.DefaultCertificateBundlePaths.ToList();
@@ -779,7 +810,7 @@ internal sealed class ContainerCreator
         }
     }
 
-    private static List<ContainerPortSpec> BuildContainerPorts(RenderedModelResource cr)
+    private static List<ContainerPortSpec> BuildContainerPorts(RenderedModelResource<Container> cr)
     {
         var ports = new List<ContainerPortSpec>();
 
