@@ -2335,7 +2335,7 @@ public static class ResourceBuilderExtensions
     /// </para>
     /// <para>
     /// The <see cref="HttpCommandOptions.GetCommandResult"/> callback will be invoked after the response is received to determine the result of the command invocation. If this callback
-    /// is not specified, the command will be considered succesful if the response status code is in the 2xx range. Set
+    /// is not specified, the command will be considered successful if the response status code is in the 2xx range. Set
     /// <see cref="HttpCommandOptions.ResultMode"/> to flow the HTTP response body back to the command caller.
     /// </para>
     /// <example>
@@ -2428,7 +2428,7 @@ public static class ResourceBuilderExtensions
     /// </para>
     /// <para>
     /// The <see cref="HttpCommandOptions.GetCommandResult"/> callback will be invoked after the response is received to determine the result of the command invocation. If this callback
-    /// is not specified, the command will be considered succesful if the response status code is in the 2xx range. Set
+    /// is not specified, the command will be considered successful if the response status code is in the 2xx range. Set
     /// <see cref="HttpCommandOptions.ResultMode"/> to flow the HTTP response body back to the command caller.
     /// </para>
     /// <example>
@@ -2568,7 +2568,7 @@ public static class ResourceBuilderExtensions
         };
     }
 
-    private static async Task<ExecuteCommandResult> GetDefaultHttpCommandResultAsync(HttpResponseMessage response, HttpCommandOptions commandOptions, CancellationToken cancellationToken)
+    internal static async Task<ExecuteCommandResult> GetDefaultHttpCommandResultAsync(HttpResponseMessage response, HttpCommandOptions commandOptions, CancellationToken cancellationToken)
     {
         var errorMessage = response.IsSuccessStatusCode
             ? null

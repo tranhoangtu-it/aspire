@@ -44,6 +44,60 @@ public class WithHttpCommandTests(ITestOutputHelper testOutputHelper)
     }
 
     [Fact]
+    public async Task GetDefaultHttpCommandResultAsync_WithoutOptIn_DoesNotReturnResponseBody()
+    {
+        using var response = new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent("""{"token":"abc123"}""", Encoding.UTF8, "application/json")
+        };
+
+        var result = await ResourceBuilderExtensions.GetDefaultHttpCommandResultAsync(response, new HttpCommandOptions(), CancellationToken.None);
+
+        Assert.True(result.Success);
+        Assert.Null(result.ErrorMessage);
+        Assert.Null(result.Result);
+        Assert.Null(result.ResultFormat);
+    }
+
+    [Fact]
+    public async Task GetDefaultHttpCommandResultAsync_WithResultModeJson_ReturnsResponseBody()
+    {
+        using var response = new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent("""{"token":"abc123"}""", Encoding.UTF8, "application/json")
+        };
+
+        var result = await ResourceBuilderExtensions.GetDefaultHttpCommandResultAsync(response, new HttpCommandOptions
+        {
+            ResultMode = HttpCommandResultMode.Json
+        }, CancellationToken.None);
+
+        Assert.True(result.Success);
+        Assert.Null(result.ErrorMessage);
+        Assert.Equal("""{"token":"abc123"}""", result.Result);
+        Assert.Equal(CommandResultFormat.Json, result.ResultFormat);
+    }
+
+    [Fact]
+    public async Task GetDefaultHttpCommandResultAsync_WithResultModeAuto_ReturnsErrorBodyUsingInferredFormat()
+    {
+        using var response = new HttpResponseMessage(HttpStatusCode.BadRequest)
+        {
+            Content = new StringContent("invalid request", Encoding.UTF8, "text/plain")
+        };
+
+        var result = await ResourceBuilderExtensions.GetDefaultHttpCommandResultAsync(response, new HttpCommandOptions
+        {
+            ResultMode = HttpCommandResultMode.Auto
+        }, CancellationToken.None);
+
+        Assert.False(result.Success);
+        Assert.Equal("Request failed with status code BadRequest", result.ErrorMessage);
+        Assert.Equal("invalid request", result.Result);
+        Assert.Equal(CommandResultFormat.Text, result.ResultFormat);
+    }
+
+    [Fact]
     public void WithHttpCommand_AddsHttpClientFactory()
     {
         // Arrange

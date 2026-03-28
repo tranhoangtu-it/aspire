@@ -30,7 +30,7 @@ public enum HttpCommandResultMode
 }
 
 /// <summary>
-/// Optional configuration for resource HTTP commands added with <see cref="ResourceBuilderExtensions.WithHttpCommand{TResource}(Aspire.Hosting.ApplicationModel.IResourceBuilder{TResource}, string, string, string?, string?, Aspire.Hosting.ApplicationModel.HttpCommandOptions?)"/>."/>
+/// Optional configuration for resource HTTP commands added with <see cref="ResourceBuilderExtensions.WithHttpCommand{TResource}(Aspire.Hosting.ApplicationModel.IResourceBuilder{TResource}, string, string, string?, string?, Aspire.Hosting.ApplicationModel.HttpCommandOptions?)"/>.
 /// </summary>
 public class HttpCommandOptions : CommandOptions
 {
