@@ -171,6 +171,21 @@ app.MapGet("/http-command-json-result", () =>
     });
 });
 
+app.MapGet("/http-command-auto-result", () =>
+{
+    if (Random.Shared.Next(2) == 0)
+    {
+        return Results.Json(new
+        {
+            token = Convert.ToBase64String(Guid.NewGuid().ToByteArray()),
+            issuedAt = DateTimeOffset.UtcNow,
+            expiresIn = 3600
+        });
+    }
+
+    return Results.Text($"Generated text token: {Convert.ToBase64String(Guid.NewGuid().ToByteArray())}");
+});
+
 app.MapGet("/http-command-text-result", () =>
 {
     return Results.Text($"Generated text token: {Convert.ToBase64String(Guid.NewGuid().ToByteArray())}");
