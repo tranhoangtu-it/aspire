@@ -127,6 +127,16 @@ const (
 	EndpointPropertyTlsEnabled EndpointProperty = "TlsEnabled"
 )
 
+// HttpCommandResultMode represents HttpCommandResultMode.
+type HttpCommandResultMode string
+
+const (
+	HttpCommandResultModeNone HttpCommandResultMode = "None"
+	HttpCommandResultModeAuto HttpCommandResultMode = "Auto"
+	HttpCommandResultModeJson HttpCommandResultMode = "Json"
+	HttpCommandResultModeText HttpCommandResultMode = "Text"
+)
+
 // CommandResultFormat represents CommandResultFormat.
 type CommandResultFormat string
 
@@ -235,6 +245,34 @@ func (d *CommandOptions) ToMap() map[string]any {
 		"IconVariant": SerializeValue(d.IconVariant),
 		"IsHighlighted": SerializeValue(d.IsHighlighted),
 		"UpdateState": SerializeValue(d.UpdateState),
+	}
+}
+
+// HttpCommandExportOptions represents HttpCommandExportOptions.
+type HttpCommandExportOptions struct {
+	Description string `json:"Description,omitempty"`
+	ConfirmationMessage string `json:"ConfirmationMessage,omitempty"`
+	IconName string `json:"IconName,omitempty"`
+	IconVariant IconVariant `json:"IconVariant,omitempty"`
+	IsHighlighted bool `json:"IsHighlighted,omitempty"`
+	CommandName string `json:"CommandName,omitempty"`
+	EndpointName string `json:"EndpointName,omitempty"`
+	MethodName string `json:"MethodName,omitempty"`
+	ResultMode HttpCommandResultMode `json:"ResultMode,omitempty"`
+}
+
+// ToMap converts the DTO to a map for JSON serialization.
+func (d *HttpCommandExportOptions) ToMap() map[string]any {
+	return map[string]any{
+		"Description": SerializeValue(d.Description),
+		"ConfirmationMessage": SerializeValue(d.ConfirmationMessage),
+		"IconName": SerializeValue(d.IconName),
+		"IconVariant": SerializeValue(d.IconVariant),
+		"IsHighlighted": SerializeValue(d.IsHighlighted),
+		"CommandName": SerializeValue(d.CommandName),
+		"EndpointName": SerializeValue(d.EndpointName),
+		"MethodName": SerializeValue(d.MethodName),
+		"ResultMode": SerializeValue(d.ResultMode),
 	}
 }
 
@@ -1121,6 +1159,23 @@ func (s *CSharpAppResource) WithCommand(name string, displayName string, execute
 		return nil, err
 	}
 	return result.(*IResource), nil
+}
+
+// WithHttpCommand adds an HTTP resource command
+func (s *CSharpAppResource) WithHttpCommand(path string, displayName string, options *HttpCommandExportOptions) (*IResourceWithEndpoints, error) {
+	reqArgs := map[string]any{
+		"builder": SerializeValue(s.Handle()),
+	}
+	reqArgs["path"] = SerializeValue(path)
+	reqArgs["displayName"] = SerializeValue(displayName)
+	if options != nil {
+		reqArgs["options"] = SerializeValue(options)
+	}
+	result, err := s.Client().InvokeCapability("Aspire.Hosting/withHttpCommand", reqArgs)
+	if err != nil {
+		return nil, err
+	}
+	return result.(*IResourceWithEndpoints), nil
 }
 
 // WithDeveloperCertificateTrust configures developer certificate trust
@@ -4203,6 +4258,23 @@ func (s *ContainerResource) WithCommand(name string, displayName string, execute
 	return result.(*IResource), nil
 }
 
+// WithHttpCommand adds an HTTP resource command
+func (s *ContainerResource) WithHttpCommand(path string, displayName string, options *HttpCommandExportOptions) (*IResourceWithEndpoints, error) {
+	reqArgs := map[string]any{
+		"builder": SerializeValue(s.Handle()),
+	}
+	reqArgs["path"] = SerializeValue(path)
+	reqArgs["displayName"] = SerializeValue(displayName)
+	if options != nil {
+		reqArgs["options"] = SerializeValue(options)
+	}
+	result, err := s.Client().InvokeCapability("Aspire.Hosting/withHttpCommand", reqArgs)
+	if err != nil {
+		return nil, err
+	}
+	return result.(*IResourceWithEndpoints), nil
+}
+
 // WithDeveloperCertificateTrust configures developer certificate trust
 func (s *ContainerResource) WithDeveloperCertificateTrust(trust bool) (*IResourceWithEnvironment, error) {
 	reqArgs := map[string]any{
@@ -5794,6 +5866,23 @@ func (s *DotnetToolResource) WithCommand(name string, displayName string, execut
 		return nil, err
 	}
 	return result.(*IResource), nil
+}
+
+// WithHttpCommand adds an HTTP resource command
+func (s *DotnetToolResource) WithHttpCommand(path string, displayName string, options *HttpCommandExportOptions) (*IResourceWithEndpoints, error) {
+	reqArgs := map[string]any{
+		"builder": SerializeValue(s.Handle()),
+	}
+	reqArgs["path"] = SerializeValue(path)
+	reqArgs["displayName"] = SerializeValue(displayName)
+	if options != nil {
+		reqArgs["options"] = SerializeValue(options)
+	}
+	result, err := s.Client().InvokeCapability("Aspire.Hosting/withHttpCommand", reqArgs)
+	if err != nil {
+		return nil, err
+	}
+	return result.(*IResourceWithEndpoints), nil
 }
 
 // WithDeveloperCertificateTrust configures developer certificate trust
@@ -7463,6 +7552,23 @@ func (s *ExecutableResource) WithCommand(name string, displayName string, execut
 		return nil, err
 	}
 	return result.(*IResource), nil
+}
+
+// WithHttpCommand adds an HTTP resource command
+func (s *ExecutableResource) WithHttpCommand(path string, displayName string, options *HttpCommandExportOptions) (*IResourceWithEndpoints, error) {
+	reqArgs := map[string]any{
+		"builder": SerializeValue(s.Handle()),
+	}
+	reqArgs["path"] = SerializeValue(path)
+	reqArgs["displayName"] = SerializeValue(displayName)
+	if options != nil {
+		reqArgs["options"] = SerializeValue(options)
+	}
+	result, err := s.Client().InvokeCapability("Aspire.Hosting/withHttpCommand", reqArgs)
+	if err != nil {
+		return nil, err
+	}
+	return result.(*IResourceWithEndpoints), nil
 }
 
 // WithDeveloperCertificateTrust configures developer certificate trust
@@ -12118,6 +12224,23 @@ func (s *ProjectResource) WithCommand(name string, displayName string, executeCo
 	return result.(*IResource), nil
 }
 
+// WithHttpCommand adds an HTTP resource command
+func (s *ProjectResource) WithHttpCommand(path string, displayName string, options *HttpCommandExportOptions) (*IResourceWithEndpoints, error) {
+	reqArgs := map[string]any{
+		"builder": SerializeValue(s.Handle()),
+	}
+	reqArgs["path"] = SerializeValue(path)
+	reqArgs["displayName"] = SerializeValue(displayName)
+	if options != nil {
+		reqArgs["options"] = SerializeValue(options)
+	}
+	result, err := s.Client().InvokeCapability("Aspire.Hosting/withHttpCommand", reqArgs)
+	if err != nil {
+		return nil, err
+	}
+	return result.(*IResourceWithEndpoints), nil
+}
+
 // WithDeveloperCertificateTrust configures developer certificate trust
 func (s *ProjectResource) WithDeveloperCertificateTrust(trust bool) (*IResourceWithEnvironment, error) {
 	reqArgs := map[string]any{
@@ -14207,6 +14330,23 @@ func (s *TestDatabaseResource) WithCommand(name string, displayName string, exec
 	return result.(*IResource), nil
 }
 
+// WithHttpCommand adds an HTTP resource command
+func (s *TestDatabaseResource) WithHttpCommand(path string, displayName string, options *HttpCommandExportOptions) (*IResourceWithEndpoints, error) {
+	reqArgs := map[string]any{
+		"builder": SerializeValue(s.Handle()),
+	}
+	reqArgs["path"] = SerializeValue(path)
+	reqArgs["displayName"] = SerializeValue(displayName)
+	if options != nil {
+		reqArgs["options"] = SerializeValue(options)
+	}
+	result, err := s.Client().InvokeCapability("Aspire.Hosting/withHttpCommand", reqArgs)
+	if err != nil {
+		return nil, err
+	}
+	return result.(*IResourceWithEndpoints), nil
+}
+
 // WithDeveloperCertificateTrust configures developer certificate trust
 func (s *TestDatabaseResource) WithDeveloperCertificateTrust(trust bool) (*IResourceWithEnvironment, error) {
 	reqArgs := map[string]any{
@@ -15839,6 +15979,23 @@ func (s *TestRedisResource) WithCommand(name string, displayName string, execute
 		return nil, err
 	}
 	return result.(*IResource), nil
+}
+
+// WithHttpCommand adds an HTTP resource command
+func (s *TestRedisResource) WithHttpCommand(path string, displayName string, options *HttpCommandExportOptions) (*IResourceWithEndpoints, error) {
+	reqArgs := map[string]any{
+		"builder": SerializeValue(s.Handle()),
+	}
+	reqArgs["path"] = SerializeValue(path)
+	reqArgs["displayName"] = SerializeValue(displayName)
+	if options != nil {
+		reqArgs["options"] = SerializeValue(options)
+	}
+	result, err := s.Client().InvokeCapability("Aspire.Hosting/withHttpCommand", reqArgs)
+	if err != nil {
+		return nil, err
+	}
+	return result.(*IResourceWithEndpoints), nil
 }
 
 // WithDeveloperCertificateTrust configures developer certificate trust
@@ -17629,6 +17786,23 @@ func (s *TestVaultResource) WithCommand(name string, displayName string, execute
 		return nil, err
 	}
 	return result.(*IResource), nil
+}
+
+// WithHttpCommand adds an HTTP resource command
+func (s *TestVaultResource) WithHttpCommand(path string, displayName string, options *HttpCommandExportOptions) (*IResourceWithEndpoints, error) {
+	reqArgs := map[string]any{
+		"builder": SerializeValue(s.Handle()),
+	}
+	reqArgs["path"] = SerializeValue(path)
+	reqArgs["displayName"] = SerializeValue(displayName)
+	if options != nil {
+		reqArgs["options"] = SerializeValue(options)
+	}
+	result, err := s.Client().InvokeCapability("Aspire.Hosting/withHttpCommand", reqArgs)
+	if err != nil {
+		return nil, err
+	}
+	return result.(*IResourceWithEndpoints), nil
 }
 
 // WithDeveloperCertificateTrust configures developer certificate trust

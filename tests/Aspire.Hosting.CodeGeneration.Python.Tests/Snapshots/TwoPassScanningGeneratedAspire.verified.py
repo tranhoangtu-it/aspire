@@ -1499,6 +1499,8 @@ DistributedApplicationOperation = typing.Literal["Run", "Publish"]
 
 EndpointProperty = typing.Literal["Url", "Host", "IPV4Host", "Port", "Scheme", "TargetPort", "HostAndPort", "TlsEnabled"]
 
+HttpCommandResultMode = typing.Literal["None", "Auto", "Json", "Text"]
+
 IconVariant = typing.Literal["Regular", "Filled"]
 
 ImagePullPolicy = typing.Literal["Default", "Always", "Missing", "Never"]
@@ -1627,6 +1629,12 @@ class HttpHealthCheckParameters(typing.TypedDict, total=False):
     endpoint_name: str
 
 
+class HttpCommandParameters(typing.TypedDict, total=False):
+    path: typing.Required[str]
+    display_name: typing.Required[str]
+    options: HttpCommandExportOptions
+
+
 class HttpProbeParameters(typing.TypedDict, total=False):
     probe_type: typing.Required[ProbeType]
     path: str
@@ -1682,6 +1690,17 @@ class ExecuteCommandResult(typing.TypedDict, total=False):
     ErrorMessage: str
     Result: str
     ResultFormat: CommandResultFormat
+
+class HttpCommandExportOptions(typing.TypedDict, total=False):
+    Description: str
+    ConfirmationMessage: str
+    IconName: str
+    IconVariant: IconVariant
+    IsHighlighted: bool
+    CommandName: str
+    EndpointName: str
+    MethodName: str
+    ResultMode: HttpCommandResultMode
 
 class ResourceEventDto(typing.TypedDict, total=False):
     ResourceName: str
@@ -4833,6 +4852,10 @@ class AbstractResourceWithEndpoints(AbstractResource):
         """Adds an HTTP health check"""
 
     @abc.abstractmethod
+    def with_http_command(self, path: str, display_name: str, *, options: HttpCommandExportOptions | None = None) -> typing.Self:
+        """Adds an HTTP resource command"""
+
+    @abc.abstractmethod
     def with_http_probe(self, probe_type: ProbeType, *, path: str | None = None, initial_delay_seconds: int | None = None, period_seconds: int | None = None, timeout_seconds: int | None = None, failure_threshold: int | None = None, success_threshold: int | None = None, endpoint_name: str | None = None) -> typing.Self:
         """Adds an HTTP health probe to the resource"""
 
@@ -6075,6 +6098,7 @@ class ContainerResourceKwargs(_BaseResourceKwargs, total=False):
     wait_for_start: AbstractResource | tuple[AbstractResource, WaitBehavior]
     wait_for_completion: AbstractResource | tuple[AbstractResource, int]
     http_health_check: HttpHealthCheckParameters | typing.Literal[True]
+    http_command: tuple[str, str] | HttpCommandParameters
     developer_certificate_trust: bool
     certificate_trust_scope: CertificateTrustScope
     https_developer_certificate: ParameterResource | typing.Literal[True]
@@ -6625,6 +6649,20 @@ class ContainerResource(_BaseResource, AbstractResourceWithEnvironment, Abstract
         self._handle = self._wrap_builder(result)
         return self
 
+    def with_http_command(self, path: str, display_name: str, *, options: HttpCommandExportOptions | None = None) -> typing.Self:
+        """Adds an HTTP resource command"""
+        rpc_args: dict[str, typing.Any] = {'builder': self._handle}
+        rpc_args['path'] = path
+        rpc_args['displayName'] = display_name
+        if options is not None:
+            rpc_args['options'] = options
+        result = self._client.invoke_capability(
+            'Aspire.Hosting/withHttpCommand',
+            rpc_args,
+        )
+        self._handle = self._wrap_builder(result)
+        return self
+
     def with_developer_certificate_trust(self, trust: bool) -> typing.Self:
         """Configures developer certificate trust"""
         rpc_args: dict[str, typing.Any] = {'builder': self._handle}
@@ -7133,6 +7171,20 @@ class ContainerResource(_BaseResource, AbstractResourceWithEnvironment, Abstract
                 handle = self._wrap_builder(client.invoke_capability('Aspire.Hosting/withHttpHealthCheck', rpc_args))
             else:
                 raise TypeError("Invalid type for option 'http_health_check'. Expected: HttpHealthCheckParameters or Literal[True]")
+        if _http_command := kwargs.pop("http_command", None):
+            if _validate_tuple_types(_http_command, (str, str)):
+                rpc_args: dict[str, typing.Any] = {"builder": handle}
+                rpc_args["path"] = typing.cast(tuple[str, str], _http_command)[0]
+                rpc_args["displayName"] = typing.cast(tuple[str, str], _http_command)[1]
+                handle = self._wrap_builder(client.invoke_capability('Aspire.Hosting/withHttpCommand', rpc_args))
+            elif _validate_dict_types(_http_command, HttpCommandParameters):
+                rpc_args: dict[str, typing.Any] = {"builder": handle}
+                rpc_args["path"] = typing.cast(HttpCommandParameters, _http_command)["path"]
+                rpc_args["displayName"] = typing.cast(HttpCommandParameters, _http_command)["display_name"]
+                rpc_args["options"] = typing.cast(HttpCommandParameters, _http_command).get("options")
+                handle = self._wrap_builder(client.invoke_capability('Aspire.Hosting/withHttpCommand', rpc_args))
+            else:
+                raise TypeError("Invalid type for option 'http_command'. Expected: (str, str) or HttpCommandParameters")
         if _developer_certificate_trust := kwargs.pop("developer_certificate_trust", None):
             if _validate_type(_developer_certificate_trust, bool):
                 rpc_args: dict[str, typing.Any] = {"builder": handle}
@@ -7263,6 +7315,7 @@ class ProjectResourceKwargs(_BaseResourceKwargs, total=False):
     wait_for_start: AbstractResource | tuple[AbstractResource, WaitBehavior]
     wait_for_completion: AbstractResource | tuple[AbstractResource, int]
     http_health_check: HttpHealthCheckParameters | typing.Literal[True]
+    http_command: tuple[str, str] | HttpCommandParameters
     developer_certificate_trust: bool
     certificate_trust_scope: CertificateTrustScope
     https_developer_certificate: ParameterResource | typing.Literal[True]
@@ -7661,6 +7714,20 @@ class ProjectResource(_BaseResource, AbstractResourceWithEnvironment, AbstractRe
         self._handle = self._wrap_builder(result)
         return self
 
+    def with_http_command(self, path: str, display_name: str, *, options: HttpCommandExportOptions | None = None) -> typing.Self:
+        """Adds an HTTP resource command"""
+        rpc_args: dict[str, typing.Any] = {'builder': self._handle}
+        rpc_args['path'] = path
+        rpc_args['displayName'] = display_name
+        if options is not None:
+            rpc_args['options'] = options
+        result = self._client.invoke_capability(
+            'Aspire.Hosting/withHttpCommand',
+            rpc_args,
+        )
+        self._handle = self._wrap_builder(result)
+        return self
+
     def with_developer_certificate_trust(self, trust: bool) -> typing.Self:
         """Configures developer certificate trust"""
         rpc_args: dict[str, typing.Any] = {'builder': self._handle}
@@ -8048,6 +8115,20 @@ class ProjectResource(_BaseResource, AbstractResourceWithEnvironment, AbstractRe
                 handle = self._wrap_builder(client.invoke_capability('Aspire.Hosting/withHttpHealthCheck', rpc_args))
             else:
                 raise TypeError("Invalid type for option 'http_health_check'. Expected: HttpHealthCheckParameters or Literal[True]")
+        if _http_command := kwargs.pop("http_command", None):
+            if _validate_tuple_types(_http_command, (str, str)):
+                rpc_args: dict[str, typing.Any] = {"builder": handle}
+                rpc_args["path"] = typing.cast(tuple[str, str], _http_command)[0]
+                rpc_args["displayName"] = typing.cast(tuple[str, str], _http_command)[1]
+                handle = self._wrap_builder(client.invoke_capability('Aspire.Hosting/withHttpCommand', rpc_args))
+            elif _validate_dict_types(_http_command, HttpCommandParameters):
+                rpc_args: dict[str, typing.Any] = {"builder": handle}
+                rpc_args["path"] = typing.cast(HttpCommandParameters, _http_command)["path"]
+                rpc_args["displayName"] = typing.cast(HttpCommandParameters, _http_command)["display_name"]
+                rpc_args["options"] = typing.cast(HttpCommandParameters, _http_command).get("options")
+                handle = self._wrap_builder(client.invoke_capability('Aspire.Hosting/withHttpCommand', rpc_args))
+            else:
+                raise TypeError("Invalid type for option 'http_command'. Expected: (str, str) or HttpCommandParameters")
         if _developer_certificate_trust := kwargs.pop("developer_certificate_trust", None):
             if _validate_type(_developer_certificate_trust, bool):
                 rpc_args: dict[str, typing.Any] = {"builder": handle}
@@ -8178,6 +8259,7 @@ class ExecutableResourceKwargs(_BaseResourceKwargs, total=False):
     wait_for_start: AbstractResource | tuple[AbstractResource, WaitBehavior]
     wait_for_completion: AbstractResource | tuple[AbstractResource, int]
     http_health_check: HttpHealthCheckParameters | typing.Literal[True]
+    http_command: tuple[str, str] | HttpCommandParameters
     developer_certificate_trust: bool
     certificate_trust_scope: CertificateTrustScope
     https_developer_certificate: ParameterResource | typing.Literal[True]
@@ -8566,6 +8648,20 @@ class ExecutableResource(_BaseResource, AbstractResourceWithEnvironment, Abstrac
         self._handle = self._wrap_builder(result)
         return self
 
+    def with_http_command(self, path: str, display_name: str, *, options: HttpCommandExportOptions | None = None) -> typing.Self:
+        """Adds an HTTP resource command"""
+        rpc_args: dict[str, typing.Any] = {'builder': self._handle}
+        rpc_args['path'] = path
+        rpc_args['displayName'] = display_name
+        if options is not None:
+            rpc_args['options'] = options
+        result = self._client.invoke_capability(
+            'Aspire.Hosting/withHttpCommand',
+            rpc_args,
+        )
+        self._handle = self._wrap_builder(result)
+        return self
+
     def with_developer_certificate_trust(self, trust: bool) -> typing.Self:
         """Configures developer certificate trust"""
         rpc_args: dict[str, typing.Any] = {'builder': self._handle}
@@ -8946,6 +9042,20 @@ class ExecutableResource(_BaseResource, AbstractResourceWithEnvironment, Abstrac
                 handle = self._wrap_builder(client.invoke_capability('Aspire.Hosting/withHttpHealthCheck', rpc_args))
             else:
                 raise TypeError("Invalid type for option 'http_health_check'. Expected: HttpHealthCheckParameters or Literal[True]")
+        if _http_command := kwargs.pop("http_command", None):
+            if _validate_tuple_types(_http_command, (str, str)):
+                rpc_args: dict[str, typing.Any] = {"builder": handle}
+                rpc_args["path"] = typing.cast(tuple[str, str], _http_command)[0]
+                rpc_args["displayName"] = typing.cast(tuple[str, str], _http_command)[1]
+                handle = self._wrap_builder(client.invoke_capability('Aspire.Hosting/withHttpCommand', rpc_args))
+            elif _validate_dict_types(_http_command, HttpCommandParameters):
+                rpc_args: dict[str, typing.Any] = {"builder": handle}
+                rpc_args["path"] = typing.cast(HttpCommandParameters, _http_command)["path"]
+                rpc_args["displayName"] = typing.cast(HttpCommandParameters, _http_command)["display_name"]
+                rpc_args["options"] = typing.cast(HttpCommandParameters, _http_command).get("options")
+                handle = self._wrap_builder(client.invoke_capability('Aspire.Hosting/withHttpCommand', rpc_args))
+            else:
+                raise TypeError("Invalid type for option 'http_command'. Expected: (str, str) or HttpCommandParameters")
         if _developer_certificate_trust := kwargs.pop("developer_certificate_trust", None):
             if _validate_type(_developer_certificate_trust, bool):
                 rpc_args: dict[str, typing.Any] = {"builder": handle}
