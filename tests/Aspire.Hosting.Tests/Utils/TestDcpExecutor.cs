@@ -5,7 +5,6 @@ using System.Collections.Concurrent;
 using Aspire.Hosting.Dcp;
 using Aspire.Hosting.Dcp.Model;
 using Microsoft.Extensions.Logging;
-using DcpSnapshotBuilder = Aspire.Hosting.Dcp.ResourceSnapshotBuilder;
 
 namespace Aspire.Hosting.Tests.Utils;
 
@@ -23,15 +22,7 @@ internal sealed class TestDcpExecutor : IDcpExecutor
 
     public ConcurrentBag<IAppResource> AppResources { get; } = [];
 
-    public CancellationToken ShutdownToken => CancellationToken.None;
-
-    public DcpSnapshotBuilder SnapshotBuilder => throw new NotImplementedException();
-
-    public void AddAllocatedEndpointInfo<TDcpResource>(IEnumerable<RenderedModelResource<TDcpResource>> resources, AllocatedEndpointsMode mode = AllocatedEndpointsMode.Workload) where TDcpResource : CustomResource, IKubernetesStaticMetadata { }
-
     public void AddServicesProducedInfo<TDcpResource>(RenderedModelResource<TDcpResource> appResource) where TDcpResource : CustomResource, IKubernetesStaticMetadata { }
-
-    public Task PublishEndpointAllocatedEventAsync<TDcpResource>(IEnumerable<RenderedModelResource<TDcpResource>> resources, CancellationToken cancellationToken) where TDcpResource : CustomResource, IKubernetesStaticMetadata => Task.CompletedTask;
 
     public Task CreateRenderedResourcesAsync<TDcpResource>(Func<RenderedModelResource<TDcpResource>, ILogger, CancellationToken, Task> createResourceFunc, IEnumerable<RenderedModelResource<TDcpResource>> resources, CancellationToken cancellationToken) where TDcpResource : CustomResource, IKubernetesStaticMetadata => Task.CompletedTask;
 

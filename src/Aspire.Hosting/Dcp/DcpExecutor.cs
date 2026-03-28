@@ -127,8 +127,6 @@ internal sealed partial class DcpExecutor : IDcpExecutor, IAsyncDisposable
     }
 
     ConcurrentBag<IAppResource> IDcpExecutor.AppResources => _appResources;
-    CancellationToken IDcpExecutor.ShutdownToken => _shutdownCancellation.Token;
-    ResourceSnapshotBuilder IDcpExecutor.SnapshotBuilder => _resourceWatcher.SnapshotBuilder;
 
     private string ContainerHostName => _configuration["AppHost:ContainerHostname"] ??
         (_options.Value.EnableAspireContainerTunnel ? KnownHostNames.DefaultContainerTunnelHostName : _dcpInfo?.Containers?.HostName ?? KnownHostNames.DockerDesktopHostBridge);
@@ -229,7 +227,8 @@ internal sealed partial class DcpExecutor : IDcpExecutor, IAsyncDisposable
                     AspireEventSource.Instance.DcpObjectCreationStart(((Container)c.DcpResource).Kind, c.DcpResourceName);
                     try
                     {
-                        await _containerCreator.CreateSingleContainerAsync(c, cctx, ct).ConfigureAwait(false);
+                        AddAllocatedEndpointInfo([c], AllocatedEndpointsMode.Workload);
+                        await CreateSingleContainerAsync(c, cctx, ct).ConfigureAwait(false);
                     }
                     finally
                     {
@@ -521,9 +520,6 @@ internal sealed partial class DcpExecutor : IDcpExecutor, IAsyncDisposable
     }
 
     // Adds allocated endpoints for all relevant resources in the model
-    void IDcpExecutor.AddAllocatedEndpointInfo<TDcpResource>(IEnumerable<RenderedModelResource<TDcpResource>> resources, AllocatedEndpointsMode mode)
-        => AddAllocatedEndpointInfo(resources, mode);
-
     private void AddAllocatedEndpointInfo<TDcpResource>(IEnumerable<RenderedModelResource<TDcpResource>> resources, AllocatedEndpointsMode mode)
             where TDcpResource : CustomResource, IKubernetesStaticMetadata
     {
@@ -816,8 +812,6 @@ internal sealed partial class DcpExecutor : IDcpExecutor, IAsyncDisposable
 
         try
         {
-            AspireEventSource.Instance.CreateAspireExecutableResourcesStart(resource.Name);
-
             var explicitStartup = resource.TryGetAnnotationsOfType<ExplicitStartupAnnotation>(out _) is true;
 
             // Publish snapshots built from DCP resources. Do this now to populate more values from DCP (source) to ensure they're
@@ -903,9 +897,77 @@ internal sealed partial class DcpExecutor : IDcpExecutor, IAsyncDisposable
             resourceLogger.LogError(ex, "Failed to create resource {ResourceName}", resource.Name);
             await _executorEvents.PublishAsync(new OnResourceFailedToStartContext(cancellationToken, resourceType, resource, DcpResourceName: null)).ConfigureAwait(false);
         }
+    }
+
+    private async Task CreateSingleContainerAsync(RenderedModelResource<Container> cr, ContainerCreationContext cctx, CancellationToken cToken)
+    {
+        var dcpContainer = cr.DcpResource;
+        var signalServicesSpecReadyOnce = ConcurrencyUtils.Once(() => cctx.ContainerServicesSpecReady.Signal());
+
+        try
+        {
+            cToken.ThrowIfCancellationRequested();
+            var logger = _loggerService.GetLogger(cr.ModelResource);
+
+            try
+            {
+                // We need to determine whether the container is using any host resources,
+                // and need to call environment and argument annotation callbacks in the process, and this means
+                // we need to raise this event now, so that "last chance dynamic setup or validation" can be performed for the resource
+                // (see docs/specs/appmodel.md#well-known-lifecycle-events)
+                await _executorEvents.PublishAsync(new OnResourceStartingContext(cToken, KnownResourceTypes.Container, cr.ModelResource, dcpContainer.Metadata.Name)).ConfigureAwait(false);
+
+                // Publish snapshot built from DCP resource. Do this now to populate more values from DCP (source) to ensure they're
+                // available if the resource isn't immediately started because it's waiting or is configured for explicit start.
+                await _executorEvents.PublishAsync(new OnResourceChangedContext(
+                    _shutdownCancellation.Token, KnownResourceTypes.Container, cr.ModelResource, cr.DcpResourceName,
+                    new ResourceStatus(null, null, null),
+                    s => _resourceWatcher.SnapshotBuilder.ToSnapshot(dcpContainer, s))).ConfigureAwait(false);
+
+                // Note: resource restart is done by calling StartResourceAsync(), which sets Spec.Start to true and
+                // calls ContainerCreator.BuildAndCreateContainerAsync() directly, bypassing the following check.
+                var explicitStartup = cr.ModelResource.TryGetLastAnnotation<ExplicitStartupAnnotation>(out _);
+                if (explicitStartup)
+                {
+                    dcpContainer.Spec.Start = false;
+                }
+
+                await PublishEndpointAllocatedEventAsync([cr], cToken).ConfigureAwait(false);
+                await _executorEvents.PublishAsync(new OnConnectionStringAvailableContext(cToken, cr.ModelResource)).ConfigureAwait(false);
+
+                var hostDependencies = (await _containerCreator.GetHostDependenciesAsync(cr.ModelResource, cToken).ConfigureAwait(false)).ToImmutableArray();
+
+                if (hostDependencies.Any())
+                {
+                    await _containerCreator.CreateTunnelDependentContainerAsync(cr, hostDependencies, cctx, signalServicesSpecReadyOnce, cToken).ConfigureAwait(false);
+                }
+                else
+                {
+                    signalServicesSpecReadyOnce();
+                    await _containerCreator.BuildAndCreateContainerAsync(cr, logger, cToken).ConfigureAwait(false);
+                }
+            }
+            catch (OperationCanceledException) when (cToken.IsCancellationRequested)
+            {
+                // Expected cancellation during shutdown - propagate clean cancellation
+                throw;
+            }
+            catch (FailedToApplyEnvironmentException)
+            {
+                // For this exception we don't want the noise of the stack trace, we've already
+                // provided more detail where we detected the issue (e.g. envvar name). To get
+                // more diagnostic information reduce logging level for DCP log category to Debug.
+                await _executorEvents.PublishAsync(new OnResourceFailedToStartContext(cToken, KnownResourceTypes.Container, cr.ModelResource, cr.DcpResourceName)).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                logger.LogError(ex, "Failed to create container resource {ResourceName}", cr.ModelResource.Name);
+                await _executorEvents.PublishAsync(new OnResourceFailedToStartContext(cToken, KnownResourceTypes.Container, cr.ModelResource, cr.DcpResourceName)).ConfigureAwait(false);
+            }
+        }
         finally
         {
-            AspireEventSource.Instance.CreateAspireExecutableResourcesStop(resource.Name);
+            signalServicesSpecReadyOnce();
         }
     }
 
@@ -1138,9 +1200,10 @@ internal sealed partial class DcpExecutor : IDcpExecutor, IAsyncDisposable
                     // Ensure we explicitly start the container even if original container was created in "delay-start" mode.
                     cr.DcpResource.Spec.Start = true;
 
+                    await PublishEndpointAllocatedEventAsync([cr], cancellationToken).ConfigureAwait(false);
                     await _executorEvents.PublishAsync(new OnConnectionStringAvailableContext(cancellationToken, resourceReference.ModelResource)).ConfigureAwait(false);
                     await _executorEvents.PublishAsync(new OnResourceStartingContext(cancellationToken, resourceType, resourceReference.ModelResource, resourceReference.DcpResourceName)).ConfigureAwait(false);
-                    await _containerCreator.CreateDcpContainerAsync(cr, resourceLogger, cancellationToken).ConfigureAwait(false);
+                    await _containerCreator.BuildAndCreateContainerAsync(cr, resourceLogger, cancellationToken).ConfigureAwait(false);
                     break;
                 case RenderedModelResource<Executable> er:
                     await EnsureResourceDeletedAsync<Executable>(resourceReference.DcpResourceName).ConfigureAwait(false);
@@ -1258,9 +1321,6 @@ internal sealed partial class DcpExecutor : IDcpExecutor, IAsyncDisposable
             }
         }
     }
-
-    async Task IDcpExecutor.PublishEndpointAllocatedEventAsync<TDcpResource>(IEnumerable<RenderedModelResource<TDcpResource>> resource,CancellationToken ct)
-        => await PublishEndpointAllocatedEventAsync(resource, ct).ConfigureAwait(false);
 
     private async Task PublishEndpointAllocatedEventAsync<TDcpResource>(IEnumerable<RenderedModelResource<TDcpResource>> resource, CancellationToken ct)
         where TDcpResource : CustomResource, IKubernetesStaticMetadata

@@ -32,36 +32,25 @@ internal interface IDcpExecutor
 
     ConcurrentBag<IAppResource> AppResources { get; }
 
-    CancellationToken ShutdownToken { get; }
-
-    ResourceSnapshotBuilder SnapshotBuilder { get; }
-
-    // Adds AllocatedEndpoint objects to Aspire EndpointAnnotations specified resources.
-    // Called after DCP allocated endpoint addresses for Services implemented by resources.
-    void AddAllocatedEndpointInfo<TDcpResource>(IEnumerable<RenderedModelResource<TDcpResource>> resources, AllocatedEndpointsMode mode = AllocatedEndpointsMode.Workload)
-        where TDcpResource : CustomResource, IKubernetesStaticMetadata;
-
     // Examines the Aspire resource annotations and adds equivalent ServiceProducerAnnotations to corresponding DCP resources.
     void AddServicesProducedInfo<TDcpResource>(RenderedModelResource<TDcpResource> appResource)
         where TDcpResource : CustomResource, IKubernetesStaticMetadata;
 
-    // Publishes ResourceEndpointsAllocatedEvent, ensuring each resource gets the event exactly once. 
-    Task PublishEndpointAllocatedEventAsync<TDcpResource>(IEnumerable<RenderedModelResource<TDcpResource>> resources, CancellationToken cancellationToken)
-        where TDcpResource : CustomResource, IKubernetesStaticMetadata;
-
-    // Orchestrates DCP resource creation, raising Aspire model events as necessary.
-    // The createResourceFunc is expected to take in the Aspire resource information and create the corresponding DCP resource.
-    // This method is meant to be called by DCP object creator components that need to create "auxiliary" objects, such as creating
-    // ContainerExec objects during Container object creation.
-    // It should be called to create resources of a single kind at a time (do not mix different resource kinds in a single call).
+    // Orchestrates creation of DCP resources that have direct counterparts in the Aspire model.
+    // The createResourceFunc is expected to take in the Aspire resource information and configure the corresponding DCP resource,
+    // and then create it by calling CreateDcpObjectsAsync. 
+    // CreateRenderedResourceAsync will take care of raising Aspire model events for the Aspire model counterpart,
+    // handle explicit-startup resources etc.
     Task CreateRenderedResourcesAsync<TDcpResource>(
         Func<RenderedModelResource<TDcpResource>, ILogger, CancellationToken, Task> createResourceFunc,
         IEnumerable<RenderedModelResource<TDcpResource>> resources,
         CancellationToken cancellationToken)
         where TDcpResource : CustomResource, IKubernetesStaticMetadata;
 
-    // Creates DCP custom resource objects via the Kubernetes API.
-    // Handles AspireEventSource tracing and error handling internally.
+    // Creates DCP custom resource objects via the Kubernetes API. Has no side effects on the Aspire model.
+    // Typical use includes implementation of createResourceFunc passed to CreateRenderedResourcesAsync,  
+    // and creating objects that do not have corresponding Aspire model resources,
+    // for example Service, ContainerNetwork, and ContainerNetworkTunnelProxy.
     Task CreateDcpObjectsAsync<TDcpResource>(IEnumerable<TDcpResource> objects, CancellationToken cancellationToken)
         where TDcpResource : CustomResource, IKubernetesStaticMetadata;
 

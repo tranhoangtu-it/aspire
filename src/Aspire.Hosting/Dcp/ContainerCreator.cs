@@ -8,7 +8,6 @@
 using System.Collections.Immutable;
 using System.Diagnostics;
 using System.Net.Sockets;
-using Aspire.Dashboard.Model;
 using Aspire.Hosting.ApplicationModel;
 using Aspire.Hosting.Dcp.Model;
 using Aspire.Hosting.Utils;
@@ -53,7 +52,6 @@ internal sealed class ContainerCreator
     private readonly DistributedApplicationModel _model;
     private readonly DistributedApplicationExecutionContext _executionContext;
     private readonly ResourceLoggerService _loggerService;
-    private readonly DcpExecutorEvents _executorEvents;
     private readonly CertificateUtilities _certificateUtilities;
     private readonly IDcpDependencyCheckService _dcpDependencyCheckService;
     private readonly ILogger<ContainerCreator> _logger;
@@ -68,7 +66,6 @@ internal sealed class ContainerCreator
         DistributedApplicationModel model,
         DistributedApplicationExecutionContext executionContext,
         ResourceLoggerService loggerService,
-        DcpExecutorEvents executorEvents,
         CertificateUtilities certificateUtilities,
         IDcpDependencyCheckService dcpDependencyCheckService,
         IHostEnvironment hostEnvironment,
@@ -80,7 +77,6 @@ internal sealed class ContainerCreator
         _model = model;
         _executionContext = executionContext;
         _loggerService = loggerService;
-        _executorEvents = executorEvents;
         _certificateUtilities = certificateUtilities;
         _dcpDependencyCheckService = dcpDependencyCheckService;
         _logger = logger;
@@ -228,70 +224,9 @@ internal sealed class ContainerCreator
 
     // ── Creation methods ──
 
-    internal async Task CreateSingleContainerAsync(RenderedModelResource<Container> cr, ContainerCreationContext cctx, CancellationToken cToken)
-    {
-        var dcpContainer = (Container)cr.DcpResource;
-        var signalServicesSpecReadyOnce = ConcurrencyUtils.Once(() => cctx.ContainerServicesSpecReady.Signal());
-
-        try
-        {
-            cToken.ThrowIfCancellationRequested();
-            var logger = _loggerService.GetLogger(cr.ModelResource);
-            _executor.AddAllocatedEndpointInfo([cr], AllocatedEndpointsMode.Workload);
-
-            try
-            {
-                await _executorEvents.PublishAsync(new OnResourceStartingContext(cToken, KnownResourceTypes.Container, cr.ModelResource, dcpContainer.Metadata.Name)).ConfigureAwait(false);
-
-                await _executorEvents.PublishAsync(new OnResourceChangedContext(
-                    _executor.ShutdownToken, KnownResourceTypes.Container, cr.ModelResource, cr.DcpResourceName,
-                    new ResourceStatus(null, null, null),
-                    s => _executor.SnapshotBuilder.ToSnapshot((Container)cr.DcpResource, s))).ConfigureAwait(false);
-
-                var explicitStartup = cr.ModelResource.TryGetLastAnnotation<ExplicitStartupAnnotation>(out _);
-                if (explicitStartup)
-                {
-                    dcpContainer.Spec.Start = false;
-                }
-
-                var hostDependencies = (await GetHostDependenciesAsync(cr.ModelResource, cToken).ConfigureAwait(false)).ToImmutableArray();
-
-                if (hostDependencies.Any())
-                {
-                    await CreateTunnelDependentContainerAsync(cr, hostDependencies, cctx, signalServicesSpecReadyOnce, cToken).ConfigureAwait(false);
-                }
-                else
-                {
-                    signalServicesSpecReadyOnce();
-                    await CreateDcpContainerAsync(cr, logger, cToken).ConfigureAwait(false);
-                }
-            }
-            catch (OperationCanceledException) when (cToken.IsCancellationRequested)
-            {
-                throw;
-            }
-            catch (FailedToApplyEnvironmentException)
-            {
-                await _executorEvents.PublishAsync(new OnResourceFailedToStartContext(cToken, KnownResourceTypes.Container, cr.ModelResource, cr.DcpResourceName)).ConfigureAwait(false);
-            }
-            catch (Exception ex)
-            {
-                logger.LogError(ex, "Failed to create container resource {ResourceName}", cr.ModelResource.Name);
-                await _executorEvents.PublishAsync(new OnResourceFailedToStartContext(cToken, KnownResourceTypes.Container, cr.ModelResource, cr.DcpResourceName)).ConfigureAwait(false);
-            }
-        }
-        finally
-        {
-            signalServicesSpecReadyOnce();
-        }
-    }
-
-    internal async Task CreateDcpContainerAsync(RenderedModelResource<Container> cr, ILogger logger, CancellationToken cToken)
+    internal async Task BuildAndCreateContainerAsync(RenderedModelResource<Container> cr, ILogger logger, CancellationToken cToken)
     {
         cToken.ThrowIfCancellationRequested();
-
-        await _executor.PublishEndpointAllocatedEventAsync([cr], cToken).ConfigureAwait(false);
-        await _executorEvents.PublishAsync(new OnConnectionStringAvailableContext(cToken, cr.ModelResource)).ConfigureAwait(false);
 
         var dcpContainer = (Container)cr.DcpResource;
         var modelContainer = cr.ModelResource;
@@ -500,7 +435,7 @@ internal sealed class ContainerCreator
 
     // ── Private helpers ──
 
-    private async Task CreateTunnelDependentContainerAsync(RenderedModelResource<Container> cr, ImmutableArray<HostResourceWithEndpoints> hostDependencies, ContainerCreationContext cctx, Action signalServicesSpecReadyOnce, CancellationToken cToken)
+    internal async Task CreateTunnelDependentContainerAsync(RenderedModelResource<Container> cr, ImmutableArray<HostResourceWithEndpoints> hostDependencies, ContainerCreationContext cctx, Action signalServicesSpecReadyOnce, CancellationToken cToken)
     {
         cToken.ThrowIfCancellationRequested();
 
@@ -521,7 +456,7 @@ internal sealed class ContainerCreator
         signalServicesSpecReadyOnce();
         await cctx.CreateTunnel.ConfigureAwait(false);
 
-        await CreateDcpContainerAsync(cr, _loggerService.GetLogger(cr.ModelResource), cToken).ConfigureAwait(false);
+        await BuildAndCreateContainerAsync(cr, _loggerService.GetLogger(cr.ModelResource), cToken).ConfigureAwait(false);
     }
 
     private string GetTunnelProxyResourceName()

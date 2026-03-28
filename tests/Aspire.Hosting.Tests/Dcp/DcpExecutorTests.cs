@@ -2858,7 +2858,6 @@ public class DcpExecutorTests
             distributedAppModel,
             executionContext,
             resourceLoggerService,
-            dcpEvts,
             certUtilities,
             dcpDependencyCheckService,
             hostEnv,
